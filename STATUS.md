@@ -3,10 +3,39 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-10-28 by Claude (timelines part 1 session)
+Last updated: 2026-10-31 by Claude (event-only repository session)
+
+**Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
+work only. dmc lives in its own repository and is set up in `.deps/dmc` by
+`dart run tool/setup_dmc.dart` (the pinned pre-event commit plus `dmc-patches/`). Entries below
+written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool/…` and the
+`build/dmc/bundle` bundle. Those now live in `.deps/dmc` (the bundle is
+`.deps/dmc/build/dmc/bundle/bin/dmc`). "This repository" in older entries means the old
+`EvilMetaMonkey/dmc-meta-hackathon`.
 
 ## Done
 
+- **Event-only repository** (2026-10-31). The organizers require a fresh repository with only
+  event work, so the entry moved from `EvilMetaMonkey/dmc-meta-hackathon` (which held dmc's
+  pre-event code and history up to `pre-hackathon`, `d177c4b`) to
+  `EvilMetaMonkey/doc-meta-hackathon`:
+  - **Classification:** every path changed since the tag was classified (table in PATCHES.md): 53
+    event paths and 50 dmc changes; nothing was unclear.
+  - **History:** `git filter-repo --path doc/ --path deploy/ --path docs/AGENT-HOOKS.md --path
+    HACKATHON.md --path STATUS.md` on a scratch clone gave 64 commits. Dates were kept, no commit
+    is at or before the tag, the oldest is 2026-10-26 17:48 UTC, and none of its 54 historical
+    paths exists in the tag's tree. `--replace-text` also scrubbed the Modal workspace name from
+    3 old commits (0 blobs contain it).
+  - **Patches:** dmc's changes are 31 patches in `dmc-patches/` (one per original commit, limited
+    to dmc paths). They apply cleanly with `git am` to a fresh clone of EvilMetaMonkey/dmc at
+    `d177c4b`, the result equals the old repository's dmc files blob for blob, and
+    `tool/export_patches.dart` reproduces them byte for byte.
+  - **Tools:** `tool/setup_dmc.dart` is idempotent and refuses to discard unexported work.
+  - **New files:** README, HACKATHON.md, AGENTS.md, CLAUDE.md, LICENSE, CHANGELOG, PATCHES.md
+    and CI were written fresh. Doc's test fixture builds `.deps/dmc` when `DMC_TEST_BIN` is
+    unset.
+  - **Verified:** in the new layout, dmc analyzer clean, 223 dmc tests and 3 Haven contract tests
+    in `.deps/dmc`; Doc analyzer clean, 162 tests.
 - Repository created from dmc at the `pre-hackathon` tag (commit `d177c4b`). Everything before the
   tag is pre-existing work; see [HACKATHON.md](HACKATHON.md).
 - Repository marked as the hackathon entry: `HACKATHON.md`, README banner, clone instructions,
@@ -501,9 +530,9 @@ Last updated: 2026-10-28 by Claude (timelines part 1 session)
   `--limit`. `go_back_before` includes manual (non-agent) checkpoints in its range, by design.
   The model's choice is only as good as the labels: dmc keeps the first 100 characters of a
   prompt.
-- The Modal workspace name is gone from the docs but still in the history of earlier commits
-  (`deploy/modal/README.md` and `STATUS.md` before `f8c2d8f`). Rewriting published history needs
-  Mike's decision.
+- The Modal workspace name is not in this repository's history (scrubbed during the 2026-10-31
+  filter). It is still in the history of the old `EvilMetaMonkey/dmc-meta-hackathon`, which
+  should be made private or archived.
 - Bisect assumes that once the tests fail, they keep failing until the end. It tests agent-turn
   states only, so edits made by hand between turns are not probed on their own. On POSIX, a
   timed-out test command is killed through its shell, and processes it started may outlive it.
@@ -556,6 +585,10 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
    Esc), ideally with SoX installed (`brew install sox`).
 3. Then, per the spec's schedule: demo and README (Nov 3), submit (Nov 4).
 
+- Mike: once happy with this repository, make `EvilMetaMonkey/dmc-meta-hackathon` private (or
+  archive it with a README pointing here). Name dmc and its setup (`tool/setup_dmc.dart`) in the
+  video, as the organizers asked.
+
 ### Before the demo
 
 - Warm Glimmer with `doc models --check` a few minutes before recording (a cold start takes
@@ -565,6 +598,12 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 ## Session log
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
+
+- 2026-10-31 · Claude · Event-only repository: classified every changed path, filtered the event
+  history into `EvilMetaMonkey/doc-meta-hackathon`, turned dmc's changes into 31 `git am` patches
+  with `tool/setup_dmc.dart` and `tool/export_patches.dart`, wrote fresh top-level files and CI.
+  Verified with the fresh-clone setup, the blob-overlap check and CI. Left open: making the old
+  repository private or archiving it (Mike).
 
 - 2026-10-28 · Claude · Timelines part 1 (branch `hackathon/timelines-1`): verified Muse Code's
   headless flags and JSON events, added `doc timelines` (Wonder plans, worktrees from dmc exports,
