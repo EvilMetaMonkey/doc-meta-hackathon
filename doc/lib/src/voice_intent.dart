@@ -15,6 +15,10 @@ enum VoiceCommand {
   lessons('lessons', 'list the lesson library'),
   bisect('bisect', 'find the turn that broke the tests'),
   status('status', 'show the latest checkpoints'),
+  timelines(
+    'timelines',
+    'try different fixes in parallel timelines, from the turn bisect found',
+  ),
   unknown('unknown', '');
 
   final String wire;
@@ -28,9 +32,12 @@ enum VoiceCommand {
     return null;
   }
 
-  /// Restore and bisect always ask "Run it?", even with `--yes`.
+  /// Restore, bisect and timelines always ask "Run it?", even with
+  /// `--yes`.
   bool get alwaysAsk =>
-      this == VoiceCommand.restore || this == VoiceCommand.bisect;
+      this == VoiceCommand.restore ||
+      this == VoiceCommand.bisect ||
+      this == VoiceCommand.timelines;
 }
 
 /// What Doc can do by voice, for the "I'm not sure" answer.
@@ -47,7 +54,10 @@ const String voiceRouteSystemPrompt =
     'before it touched auth"), "summarize_latest" (summarize the latest '
     'checkpoint or agent turn), "lesson_brief" (brief on lessons before a '
     'task; put the task in text), "lessons" (list lessons), "bisect" (find '
-    'which turn broke the tests), "status" (what happened recently), and '
+    'which turn broke the tests), "status" (what happened recently), '
+    '"timelines" (try several different fixes in parallel, for example '
+    '"try three different fixes for the failing test"; put the fix to try '
+    'in text), and '
     '"unknown" for anything else. Answer with only a JSON object: '
     '{"command": one of those, "text": the request in the user\'s own words '
     '(the task for lesson_brief), "confidence": 0 to 1}. Speech '
@@ -192,6 +202,11 @@ VoiceAction planVoiceAction(VoiceIntent intent, String transcript) {
     VoiceCommand.lessons => VoiceAction(intent.command, ['lessons']),
     VoiceCommand.bisect => VoiceAction(intent.command, ['bisect']),
     VoiceCommand.status => VoiceAction(intent.command, ['status']),
+    VoiceCommand.timelines => VoiceAction(intent.command, [
+      'timelines',
+      intent.text.isEmpty ? heard : intent.text,
+      '--from-bisect',
+    ]),
     VoiceCommand.unknown => throw StateError('handled above'),
   };
 }

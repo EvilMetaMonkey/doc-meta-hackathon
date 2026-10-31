@@ -364,6 +364,31 @@ void main() {
     expect('$out', contains('I\'ll run: doc summarize ${ids[1]}'));
   });
 
+  test('"try three different fixes" routes to timelines from the bisect, '
+      'with the workspace\'s bisectTest, and --yes never answers it', () async {
+    final root =
+        ((await dmcJson(['checkpoint', 'list']))['workspace'] as Map)['path']
+            as String;
+    await providers(
+      transcript: 'try three different fixes for the failing test',
+      routing: route('timelines', text: 'fix the failing test'),
+      extra: {
+        'workspaces': {
+          root: {'bisectTest': 'python3 -m unittest'},
+        },
+      },
+    );
+    expect(await doc(['talk', '--file', wav(0.3), '--yes']), 0, reason: '$err');
+    expect(
+      '$out',
+      contains(
+        'I heard: "try three different fixes for the failing test" → I\'ll run: '
+        'doc timelines "fix the failing test" --from-bisect --test "python3 -m unittest"\n'
+        'Run it? [y/N] Nothing ran.',
+      ),
+    );
+  });
+
   test('--local refuses doc talk and sends nothing', () async {
     final (voice, _) = await providers(routing: route('restore'));
     expect(await doc(['talk', '--file', wav(0.3), '--local']), 1);
