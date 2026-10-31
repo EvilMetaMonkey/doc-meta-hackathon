@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Mon, 26 Oct 2026 18:00:10 +0000
-Subject: [PATCH 02/31] Add STATUS.md and require agents to keep it current
+Subject: [PATCH] Add STATUS.md and require agents to keep it current
 
 STATUS.md tracks what is done, in progress, broken and next, plus a
 session log. AGENTS.md and CLAUDE.md now tell every coding agent to

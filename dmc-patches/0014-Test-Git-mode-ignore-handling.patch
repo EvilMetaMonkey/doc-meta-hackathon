@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 01:55:03 -0500
-Subject: [PATCH 14/31] Test Git-mode ignore handling
+Subject: [PATCH] Test Git-mode ignore handling
 
 Nested .gitignore, negation, a character class, info/exclude, a tracked
 file matching a pattern, gitlinks and nested repositories, .dmcignore

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Mon, 26 Oct 2026 20:22:31 -0500
-Subject: [PATCH 10/31] Record the Muse Code 1.4.13 verification
+Subject: [PATCH] Record the Muse Code 1.4.13 verification
 
 docs/AGENT-HOOKS.md marks each Muse fact verified (1.4.13) or still
 researched: both config paths, the trust step, StopFailure and Interrupt

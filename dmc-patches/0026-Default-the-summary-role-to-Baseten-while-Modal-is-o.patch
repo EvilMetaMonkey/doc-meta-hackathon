@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Wed, 28 Oct 2026 02:15:33 -0500
-Subject: [PATCH 26/31] Default the summary role to Baseten while Modal is on
- hold
+Subject: [PATCH] Default the summary role to Baseten while Modal is on hold
 
 Mike chose not to add a card on Modal yet. summary now uses Baseten Muse
 Spark Open with a logged Fireworks fallback. The modal provider and

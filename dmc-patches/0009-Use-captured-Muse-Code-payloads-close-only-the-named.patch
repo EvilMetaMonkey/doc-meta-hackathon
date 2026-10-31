@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Mon, 26 Oct 2026 20:17:21 -0500
-Subject: [PATCH 09/31] Use captured Muse Code payloads; close only the named
- turn
+Subject: [PATCH] Use captured Muse Code payloads; close only the named turn
 
 Replace the synthetic Muse fixtures with scrubbed captures from Muse
 Code 1.4.13 on macOS (exec run, unreachable-endpoint StopFailure, and an

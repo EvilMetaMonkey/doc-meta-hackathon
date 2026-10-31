@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 01:55:03 -0500
-Subject: [PATCH 13/31] Refuse checkpoint restore and redo of Git-ignored paths
+Subject: [PATCH] Refuse checkpoint restore and redo of Git-ignored paths
 
 In a Git work tree, the planner asks git check-ignore (one batch per
 plan) which checkpoint paths Git ignores now, and reports each as a

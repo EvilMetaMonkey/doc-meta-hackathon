@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 15:59:41 -0500
-Subject: [PATCH 22/31] Document the worktree rule, Doc and the verified Muse
- model IDs
+Subject: [PATCH] Document the worktree rule, Doc and the verified Muse model
+ IDs
 
 doc/README.md covers Doc's boundary, commands, providers, roles,
 redaction, budgets and the facts verified on 2026-10-27 (meta and

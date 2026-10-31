@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Mon, 26 Oct 2026 17:48:34 +0000
-Subject: [PATCH 01/31] Mark repository as the Meta AI Developer Hackathon 2026
- entry
+Subject: [PATCH] Mark repository as the Meta AI Developer Hackathon 2026 entry
 
 Add HACKATHON.md, which records the pre-existing baseline (tag
 pre-hackathon, commit d177c4b) and explains how to see the hackathon

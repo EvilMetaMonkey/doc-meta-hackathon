@@ -51,7 +51,7 @@ every commit is dated 2026-10-26 or later.
 - **The Muse Glimmer deployment** on Modal ([`deploy/modal/`](deploy/modal/)).
 - **Verified agent-hook research** ([`docs/AGENT-HOOKS.md`](docs/AGENT-HOOKS.md)).
 - **The demo** ([`demo/`](demo/)): a script that builds the demo repository and the video runbook.
-- **The event's changes to dmc**, as 31 patches in [`dmc-patches/`](dmc-patches/), described one
+- **The event's changes to dmc**, as 34 patches in [`dmc-patches/`](dmc-patches/), described one
   by one in [PATCHES.md](PATCHES.md):
   - agent-turn checkpoints from Muse Code and Claude Code hooks (`dmc agent-hook`, `dmc hooks`,
     schema 4);
@@ -59,6 +59,7 @@ every commit is dated 2026-10-26 or later.
   - per-file ignore-policy drift (schema 5);
   - `dmc checkpoint export`;
   - the worktree rule;
+  - `dmc disable` and `dmc doctor`'s agent-hook checks;
   - test fixes and docs.
 
   dmc stays deterministic: it runs no model.

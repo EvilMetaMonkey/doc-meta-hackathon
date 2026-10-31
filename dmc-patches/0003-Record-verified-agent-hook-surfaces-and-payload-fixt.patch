@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 26 Oct 2026 20:28:12 +0000
-Subject: [PATCH 03/31] Record verified agent hook surfaces and payload
- fixtures
+Subject: [PATCH] Record verified agent hook surfaces and payload fixtures
 
 Probe Claude Code 2.1.310 hooks in a throwaway repo (settings.local.json,
 Stop/StopFailure/SessionEnd payloads, subdirectory cwd) and record the

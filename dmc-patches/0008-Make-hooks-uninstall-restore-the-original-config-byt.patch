@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Mon, 26 Oct 2026 20:17:05 -0500
-Subject: [PATCH 08/31] Make hooks uninstall restore the original config bytes
+Subject: [PATCH] Make hooks uninstall restore the original config bytes
 
 Uninstall now drops a "hooks" object it emptied, deletes a config file
 left empty (one dmc created), and writes in the original file's layout

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Mon, 26 Oct 2026 18:43:41 -0500
-Subject: [PATCH 07/31] Resolve agent hook fixtures from the package root
+Subject: [PATCH] Resolve agent hook fixtures from the package root
 
 dart test runs test files in parallel isolates of one process, and other
 test files change Directory.current, so a relative fixture path failed

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Wed, 28 Oct 2026 09:59:10 -0500
-Subject: [PATCH 28/31] Document doc bisect
+Subject: [PATCH] Document doc bisect
 
 doc/README.md gains a Bisect section: how it searches and probes,
 dependencies (--link, --setup, suggestions), the result, the

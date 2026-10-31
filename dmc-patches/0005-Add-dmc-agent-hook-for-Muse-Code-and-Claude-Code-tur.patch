@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 26 Oct 2026 20:37:24 +0000
-Subject: [PATCH 05/31] Add dmc agent-hook for Muse Code and Claude Code turns
+Subject: [PATCH] Add dmc agent-hook for Muse Code and Claude Code turns
 
 `dmc agent-hook <muse-code|claude-code> <event>` finds the workspace from
 the payload cwd, begins a labelled checkpoint with agent context on

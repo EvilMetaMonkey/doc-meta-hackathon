@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Wed, 28 Oct 2026 19:57:44 -0500
-Subject: [PATCH 30/31] Document Hey Doc push-to-talk and the lesson-draft
- change
+Subject: [PATCH] Document Hey Doc push-to-talk and the lesson-draft change
 
 doc/README.md records Meta's realtime transcription contract as documented
 (handshake, binary frames, endStream, event and close-code names, pricing),

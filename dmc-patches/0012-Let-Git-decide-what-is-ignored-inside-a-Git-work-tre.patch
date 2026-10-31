@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 01:55:03 -0500
-Subject: [PATCH 12/31] Let Git decide what is ignored inside a Git work tree
+Subject: [PATCH] Let Git decide what is ignored inside a Git work tree
 
 When the workspace root is inside a Git work tree, the protected file
 list is git ls-files --cached --others --exclude-standard (run with -C

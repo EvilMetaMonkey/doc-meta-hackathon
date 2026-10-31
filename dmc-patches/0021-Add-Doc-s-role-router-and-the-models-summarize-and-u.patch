@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 15:38:21 -0500
-Subject: [PATCH 21/31] Add Doc's role router and the models, summarize and
- usage commands
+Subject: [PATCH] Add Doc's role router and the models, summarize and usage
+ commands
 
 - Roles map to a provider and model from the config: summary -> local
   Muse Glimmer, workhorse -> baseten Muse Spark Open, restore -> meta
