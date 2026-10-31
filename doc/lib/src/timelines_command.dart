@@ -956,6 +956,13 @@ Future<int> _pick(DocContext context) async {
   final where = Directory(timeline.worktree).existsSync()
       ? timeline.worktree
       : run.repo;
+  // The patch, in Doc's run folder (never the repository).
+  final patchFile = File(
+    p.join(_timelinesRoot(context), run.id, 'pick-${timeline.k}.patch'),
+  );
+  patchFile.writeAsStringSync(
+    await _git(context, where, ['diff', run.baseCommit!, timeline.branch]),
+  );
   final diff = await _git(context, where, [
     'diff',
     '--stat',
@@ -983,19 +990,16 @@ Future<int> _pick(DocContext context) async {
       'Doc changes nothing in your repository. To bring this timeline in, in ${run.repo}:',
     )
     ..writeln(
-      '  git status                    # commit or stash your own changes first',
+      '  # Only the timeline\'s change, onto your working copy (your other changes stay):',
     )
-    ..writeln('  # Only the timeline\'s change, onto your working copy:')
+    ..writeln('  git apply --check "${patchFile.path}"   # dry run')
+    ..writeln('  git apply "${patchFile.path}"')
     ..writeln(
-      '  git diff ${run.baseCommit!.substring(0, 12)} ${timeline.branch} > /tmp/${run.id}-${timeline.k}.patch',
-    )
-    ..writeln('  git apply --3way /tmp/${run.id}-${timeline.k}.patch')
-    ..writeln(
-      '  # Or merge the branch (this also brings the "timeline base" commit, which sets the files to the base state):',
+      '  # Or, on a clean working tree, merge the branch (this also brings the "timeline base" commit, which sets the files to the base state):',
     )
     ..writeln('  git merge --no-ff ${timeline.branch}')
     ..writeln(
-      'If your working copy is past the base (later agent turns), first go back with doc restore ${run.baseCheckpoint} (dmc previews it and asks), or apply the patch and resolve.',
+      'If the patch does not apply (your working copy changed those lines after the base), first go back with doc restore ${run.baseCheckpoint} (dmc previews it and asks), then apply it.',
     );
   final others = run.timelines
       .where((t) => t.k != timeline.k)

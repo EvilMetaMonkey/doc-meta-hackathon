@@ -405,7 +405,19 @@ void main() {
     expect(picked, contains('Timeline 1 of $id: Put the value back'));
     expect(picked, contains('-bad\n+good'));
     expect(picked, contains('git merge --no-ff doc/timeline/$id/1'));
-    expect(picked, contains('git apply --3way'));
+    final patch = File(
+      p.join(home.path, 'data', 'timelines', id, 'pick-1.patch'),
+    );
+    expect(patch.readAsStringSync(), contains('-bad\n+good'));
+    expect(picked, contains('git apply "${patch.path}"'));
+    expect(picked, isNot(contains('--3way')));
+    // The printed command works on the dirty working copy (checked only).
+    final check = await Process.run('git', [
+      'apply',
+      '--check',
+      patch.path,
+    ], workingDirectory: repo.path);
+    expect(check.exitCode, 0, reason: '${check.stderr}');
     expect(picked, contains('doc restore ${ids[1]}'));
     expect(picked, contains('archived as branches (never deleted)'));
     expect(snapshot(), before);
