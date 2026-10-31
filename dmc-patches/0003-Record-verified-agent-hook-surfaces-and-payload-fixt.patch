@@ -1,0 +1,236 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 20:28:12 +0000
+Subject: [PATCH 03/31] Record verified agent hook surfaces and payload
+ fixtures
+
+Probe Claude Code 2.1.310 hooks in a throwaway repo (settings.local.json,
+Stop/StopFailure/SessionEnd payloads, subdirectory cwd) and record the
+results in docs/AGENT-HOOKS.md. Muse Code is not installed on this machine,
+so its researched surface is documented as unverified and its fixtures are
+synthetic.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TZntz1MeHVb13u53UKzx8U
+---
+ test/fixtures/agent_hooks/README.md              | 16 ++++++++++++++++
+ .../agent_hooks/claude_code/session_end.json     |  8 ++++++++
+ .../agent_hooks/claude_code/session_start.json   |  7 +++++++
+ test/fixtures/agent_hooks/claude_code/stop.json  | 15 +++++++++++++++
+ .../agent_hooks/claude_code/stop_failure.json    | 12 ++++++++++++
+ .../claude_code/user_prompt_submit.json          |  9 +++++++++
+ .../agent_hooks/muse_code/interrupt.json         |  9 +++++++++
+ .../agent_hooks/muse_code/session_end.json       |  9 +++++++++
+ .../agent_hooks/muse_code/session_start.json     |  8 ++++++++
+ test/fixtures/agent_hooks/muse_code/stop.json    | 11 +++++++++++
+ .../agent_hooks/muse_code/stop_failure.json      |  9 +++++++++
+ .../muse_code/user_prompt_submit.json            | 10 ++++++++++
+ 12 files changed, 123 insertions(+)
+ create mode 100644 test/fixtures/agent_hooks/README.md
+ create mode 100644 test/fixtures/agent_hooks/claude_code/session_end.json
+ create mode 100644 test/fixtures/agent_hooks/claude_code/session_start.json
+ create mode 100644 test/fixtures/agent_hooks/claude_code/stop.json
+ create mode 100644 test/fixtures/agent_hooks/claude_code/stop_failure.json
+ create mode 100644 test/fixtures/agent_hooks/claude_code/user_prompt_submit.json
+ create mode 100644 test/fixtures/agent_hooks/muse_code/interrupt.json
+ create mode 100644 test/fixtures/agent_hooks/muse_code/session_end.json
+ create mode 100644 test/fixtures/agent_hooks/muse_code/session_start.json
+ create mode 100644 test/fixtures/agent_hooks/muse_code/stop.json
+ create mode 100644 test/fixtures/agent_hooks/muse_code/stop_failure.json
+ create mode 100644 test/fixtures/agent_hooks/muse_code/user_prompt_submit.json
+
+diff --git a/test/fixtures/agent_hooks/README.md b/test/fixtures/agent_hooks/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7c96eff2ec9ce7e4f05fafde8cc43bf97c28d0a
+--- /dev/null
++++ b/test/fixtures/agent_hooks/README.md
+@@ -0,0 +1,16 @@
++# Agent hook payload fixtures
++
++Stdin payloads for `dmc agent-hook`. See `docs/AGENT-HOOKS.md` for how each was obtained.
++
++- `claude_code/`: **captured** from Claude Code 2.1.310 on Linux on 2026-10-26 with a probe hook
++  in a throwaway repository's `.claude/settings.local.json`. `stop_failure.json` comes from a run
++  whose API endpoint refused connections. Scrubbed: session and prompt UUIDs replaced, home
++  directory and project path replaced with `/home/dev` and `/home/dev/project`.
++- `muse_code/`: **synthetic**. Muse Code was not installed on the machine that wrote these, so
++  they follow the researched 1.4.x field list (snake_case `hook_event_name`, `session_id`, `cwd`,
++  `transcript_path` (null here), `model`, `permission_mode`, plus `prompt`/`turn_id` on
++  UserPromptSubmit, `turn_id`/`last_assistant_message`/`stop_hook_active` on Stop, and `reason` on
++  SessionEnd). The StopFailure and Interrupt field sets are a guess. Replace them with captured
++  payloads once a probe runs against a real Muse Code install.
++
++Tests overwrite `cwd` with a temporary workspace, so the paths here are placeholders.
+diff --git a/test/fixtures/agent_hooks/claude_code/session_end.json b/test/fixtures/agent_hooks/claude_code/session_end.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..09509c270029817abf0a1a748bbebbbd3c08a70e
+--- /dev/null
++++ b/test/fixtures/agent_hooks/claude_code/session_end.json
+@@ -0,0 +1,8 @@
++{
++  "session_id": "11111111-2222-4333-8444-555555555555",
++  "transcript_path": "/home/dev/.claude/projects/-home-dev-project/11111111-2222-4333-8444-555555555555.jsonl",
++  "cwd": "/home/dev/project",
++  "prompt_id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
++  "hook_event_name": "SessionEnd",
++  "reason": "other"
++}
+diff --git a/test/fixtures/agent_hooks/claude_code/session_start.json b/test/fixtures/agent_hooks/claude_code/session_start.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..965481308178b54737cd6ad328ba846d40bc9d23
+--- /dev/null
++++ b/test/fixtures/agent_hooks/claude_code/session_start.json
+@@ -0,0 +1,7 @@
++{
++  "session_id": "11111111-2222-4333-8444-555555555555",
++  "transcript_path": "/home/dev/.claude/projects/-home-dev-project/11111111-2222-4333-8444-555555555555.jsonl",
++  "cwd": "/home/dev/project",
++  "hook_event_name": "SessionStart",
++  "source": "startup"
++}
+diff --git a/test/fixtures/agent_hooks/claude_code/stop.json b/test/fixtures/agent_hooks/claude_code/stop.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..8adbb77287c3799ba842b57998ec760162e114dd
+--- /dev/null
++++ b/test/fixtures/agent_hooks/claude_code/stop.json
+@@ -0,0 +1,15 @@
++{
++  "session_id": "11111111-2222-4333-8444-555555555555",
++  "transcript_path": "/home/dev/.claude/projects/-home-dev-project/11111111-2222-4333-8444-555555555555.jsonl",
++  "cwd": "/home/dev/project",
++  "prompt_id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
++  "permission_mode": "default",
++  "effort": {
++    "level": "medium"
++  },
++  "hook_event_name": "Stop",
++  "stop_hook_active": false,
++  "last_assistant_message": "ok",
++  "background_tasks": [],
++  "session_crons": []
++}
+diff --git a/test/fixtures/agent_hooks/claude_code/stop_failure.json b/test/fixtures/agent_hooks/claude_code/stop_failure.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..f37fbc8158d500591dec0004fcbf492552abd5d7
+--- /dev/null
++++ b/test/fixtures/agent_hooks/claude_code/stop_failure.json
+@@ -0,0 +1,12 @@
++{
++  "session_id": "11111111-2222-4333-8444-555555555555",
++  "transcript_path": "/home/dev/.claude/projects/-home-dev-project/11111111-2222-4333-8444-555555555555.jsonl",
++  "cwd": "/home/dev/project",
++  "prompt_id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
++  "effort": {
++    "level": "medium"
++  },
++  "hook_event_name": "StopFailure",
++  "error": "server_error",
++  "last_assistant_message": "API Error: Connection refused \u2014 a firewall or proxy may be blocking it (ECONNREFUSED)"
++}
+diff --git a/test/fixtures/agent_hooks/claude_code/user_prompt_submit.json b/test/fixtures/agent_hooks/claude_code/user_prompt_submit.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbd26757232e58b3ff7879926f40dc1e2b2ed39c
+--- /dev/null
++++ b/test/fixtures/agent_hooks/claude_code/user_prompt_submit.json
+@@ -0,0 +1,9 @@
++{
++  "session_id": "11111111-2222-4333-8444-555555555555",
++  "transcript_path": "/home/dev/.claude/projects/-home-dev-project/11111111-2222-4333-8444-555555555555.jsonl",
++  "cwd": "/home/dev/project",
++  "prompt_id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
++  "permission_mode": "default",
++  "hook_event_name": "UserPromptSubmit",
++  "prompt": "reply ok"
++}
+diff --git a/test/fixtures/agent_hooks/muse_code/interrupt.json b/test/fixtures/agent_hooks/muse_code/interrupt.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..769ed5d0da4b06705e67e517c20e544903957bf9
+--- /dev/null
++++ b/test/fixtures/agent_hooks/muse_code/interrupt.json
+@@ -0,0 +1,9 @@
++{
++  "hook_event_name": "Interrupt",
++  "session_id": "22222222-3333-4444-8555-666666666666",
++  "cwd": "/home/dev/project",
++  "transcript_path": null,
++  "model": "muse-spark-1.3",
++  "permission_mode": "default",
++  "turn_id": "turn-0001"
++}
+diff --git a/test/fixtures/agent_hooks/muse_code/session_end.json b/test/fixtures/agent_hooks/muse_code/session_end.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..04b47242ede82a8290e78f298f19ae02ddd86d6f
+--- /dev/null
++++ b/test/fixtures/agent_hooks/muse_code/session_end.json
+@@ -0,0 +1,9 @@
++{
++  "hook_event_name": "SessionEnd",
++  "session_id": "22222222-3333-4444-8555-666666666666",
++  "cwd": "/home/dev/project",
++  "transcript_path": null,
++  "model": "muse-spark-1.3",
++  "permission_mode": "default",
++  "reason": "exit"
++}
+diff --git a/test/fixtures/agent_hooks/muse_code/session_start.json b/test/fixtures/agent_hooks/muse_code/session_start.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..79bb80bf26300cb335fb6c5a0efdb07c2e65f60d
+--- /dev/null
++++ b/test/fixtures/agent_hooks/muse_code/session_start.json
+@@ -0,0 +1,8 @@
++{
++  "hook_event_name": "SessionStart",
++  "session_id": "22222222-3333-4444-8555-666666666666",
++  "cwd": "/home/dev/project",
++  "transcript_path": null,
++  "model": "muse-spark-1.3",
++  "permission_mode": "default"
++}
+diff --git a/test/fixtures/agent_hooks/muse_code/stop.json b/test/fixtures/agent_hooks/muse_code/stop.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..f45fbb7928da948dfa906fa848a52ca001436005
+--- /dev/null
++++ b/test/fixtures/agent_hooks/muse_code/stop.json
+@@ -0,0 +1,11 @@
++{
++  "hook_event_name": "Stop",
++  "session_id": "22222222-3333-4444-8555-666666666666",
++  "cwd": "/home/dev/project",
++  "transcript_path": null,
++  "model": "muse-spark-1.3",
++  "permission_mode": "default",
++  "turn_id": "turn-0001",
++  "last_assistant_message": "Done.",
++  "stop_hook_active": false
++}
+diff --git a/test/fixtures/agent_hooks/muse_code/stop_failure.json b/test/fixtures/agent_hooks/muse_code/stop_failure.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c2279730f9c6284335b44a9524cec77a5dc4c34
+--- /dev/null
++++ b/test/fixtures/agent_hooks/muse_code/stop_failure.json
+@@ -0,0 +1,9 @@
++{
++  "hook_event_name": "StopFailure",
++  "session_id": "22222222-3333-4444-8555-666666666666",
++  "cwd": "/home/dev/project",
++  "transcript_path": null,
++  "model": "muse-spark-1.3",
++  "permission_mode": "default",
++  "turn_id": "turn-0001"
++}
+diff --git a/test/fixtures/agent_hooks/muse_code/user_prompt_submit.json b/test/fixtures/agent_hooks/muse_code/user_prompt_submit.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..de8e610be06f080366312da1e17b4ce92b670941
+--- /dev/null
++++ b/test/fixtures/agent_hooks/muse_code/user_prompt_submit.json
+@@ -0,0 +1,10 @@
++{
++  "hook_event_name": "UserPromptSubmit",
++  "session_id": "22222222-3333-4444-8555-666666666666",
++  "cwd": "/home/dev/project",
++  "transcript_path": null,
++  "model": "muse-spark-1.3",
++  "permission_mode": "default",
++  "prompt": "Refactor the auth module\nand keep the tests green",
++  "turn_id": "turn-0001"
++}

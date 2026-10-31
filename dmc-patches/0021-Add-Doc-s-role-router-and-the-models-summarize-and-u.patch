@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 15:38:21 -0500
+Subject: [PATCH 21/31] Add Doc's role router and the models, summarize and
+ usage commands
+
+- Roles map to a provider and model from the config: summary -> local
+  Muse Glimmer, workhorse -> baseten Muse Spark Open, restore -> meta
+  muse-spark-1.3 (fallback baseten), planner and judge -> meta
+  muse-wonder-1.0, voice -> meta muse-voice-transcribe-1.0 (config
+  only). --role-provider role=provider overrides one role for one run.
+- The router redacts every prompt, needs a key, a configured price and
+  budget room for hosted calls, records usage, and takes one explicit,
+  logged fallback: a role's configured hosted fallback after its hosted
+  provider fails after retries (never for a missing or rejected key or
+  a used-up budget, and never from local). --local sends every role to
+  the local provider and refuses any hosted call.
+- doc models [--check] [--available]: each role's provider, model and
+  key status (never the key); --check sends one tiny prompt per
+  provider and shows latency, tokens and cost; --available lists model
+  IDs from GET /models. A missing local server is said plainly.
+- doc summarize <checkpoint-id>: reads checkpoint show and diff JSON
+  from dmc, redacts, and asks the summary role for 2-3 sentences.
+  --show-prompt prints exactly what would be sent and sends nothing.
+- doc usage: tokens and estimated cost per provider against budgets.
+- CI analyzes and tests doc/, driving the compiled bundle.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .github/workflows/ci.yml | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 684f54c3a16ab602ba9cbd064addcff21449f3dd..4ab5536e18acb2e2b71eed4b81910a07f44df95b 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -27,3 +27,12 @@ jobs:
+         run: dart run tool/smoke_bundle.dart build/ci-dmc/bundle/bin/dmc
+       - if: runner.os == 'Windows'
+         run: dart run tool/smoke_bundle.dart build/ci-dmc/bundle/bin/dmc.exe
++      # Doc (doc/) is a separate package; its tests drive the bundle built above.
++      - run: dart pub get --enforce-lockfile
++        working-directory: doc
++      - run: dart analyze --fatal-infos
++        working-directory: doc
++      - run: dart test --concurrency=1
++        working-directory: doc
++        env:
++          DMC_TEST_BIN: ${{ github.workspace }}/build/ci-dmc/bundle/bin/${{ runner.os == 'Windows' && 'dmc.exe' || 'dmc' }}

@@ -1,0 +1,445 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 20:31:25 +0000
+Subject: [PATCH 04/31] Add agent-turn context to checkpoints (schema 4)
+
+Additive migration: nullable agent, session, turn, transcript path, and
+transcript size/SHA-256 columns on checkpoints. Checkpoint JSON gains an
+additive `agent` object (null for manual/Haven checkpoints) within machine
+schema 1, and checkpoint show/list and status print agent context.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TZntz1MeHVb13u53UKzx8U
+---
+ AGENTS.md                          |  2 +-
+ docs/HAVEN-INTEGRATION.md          |  2 +-
+ lib/src/checkpoint_models.dart     | 34 +++++++++++
+ lib/src/checkpoint_repository.dart | 46 +++++++++++++-
+ lib/src/checkpoint_service.dart    | 15 ++++-
+ lib/src/database.dart              | 27 ++++++++-
+ lib/src/status.dart                |  7 +++
+ test/migration_test.dart           | 96 +++++++++++++++++++++++++++++-
+ 8 files changed, 219 insertions(+), 10 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index e27be3c6a26b4feacc12611cf5b664a4a6bb2376..ccef151648817f8ee757f214a2fb401e2ceb6be0 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -103,7 +103,7 @@ The most important product qualities are:
+ - DMC working directory: `.dmc/`
+ - Snapshots folder: `.dmc/snapshots/`
+ - Database file: `.dmc/dmc.db`
+-- Schema version: 3 (`PRAGMA user_version`); history, marks, and restore events retain their legacy meanings. Checkpoint operation and per-file journal tables are additive and foreign-key constrained.
++- Schema version: 4 (`PRAGMA user_version`); history, marks, and restore events retain their legacy meanings. Checkpoint operation and per-file journal tables are additive and foreign-key constrained. Version 4 adds nullable agent-turn context columns to `checkpoints` (agent, session, turn, transcript path, and transcript size/SHA-256 at close); see `docs/AGENT-HOOKS.md`.
+ - One checkpoint may be `creating`, `open`, or `closing`. `invalid`, `closed`, and `released` checkpoints do not block a new begin. Explicit release can abandon an interrupted state.
+ - Begin and close each scan and verify eligible file state. Policy changes between them invalidate close. A rename is represented as deletion plus creation.
+ - Manifest and operation references pin history until explicit release. Release is blocked while an operation is incomplete, then clears snapshot IDs while retaining hashes, modes, classifications, issues, and audit metadata.
+diff --git a/docs/HAVEN-INTEGRATION.md b/docs/HAVEN-INTEGRATION.md
+index cdaccc96f874f92c12c6d61862008906b95b0946..aef102009894436d5ab302e8a541143dbe8ad070 100644
+--- a/docs/HAVEN-INTEGRATION.md
++++ b/docs/HAVEN-INTEGRATION.md
+@@ -52,7 +52,7 @@ All fields listed here are part of machine schema 1. Additive fields may appear
+ | `checkpoint recover --preview` | On a valid pending operation: `preview`, `applied`, `canRecover`, `mode`, `operationId`, `checkpointId`, `operation`, `actions`, `conflicts` |
+ | `checkpoint release` | `checkpoint`, `issues` |
+ 
+-A checkpoint summary includes `id`, nullable `label`, `source`, `status`, `manifestVersion`, millisecond timestamps, `policyFingerprint`, `protectedFileCount`, `changedFileCount`, `exclusionCount`, and `fatalErrorCount`. Status values are `creating`, `open`, `closing`, `closed`, `invalid`, and `released`.
++A checkpoint summary includes `id`, nullable `label`, `source`, `status`, `manifestVersion`, millisecond timestamps, `policyFingerprint`, `protectedFileCount`, `changedFileCount`, `exclusionCount`, `fatalErrorCount`, and `agent`. `agent` is additive and null unless an agent hook began the checkpoint; otherwise it holds `name`, `sessionId`, `turnId`, `transcriptPath`, `transcriptBytes` and `transcriptSha256` (the last two set at close). See `docs/AGENT-HOOKS.md`. Status values are `creating`, `open`, `closing`, `closed`, `invalid`, and `released`.
+ 
+ File entries contain a relative `path`, `before` and nullable `after` states, and a nullable `change`. State objects contain `kind`, nullable `snapshotId`, nullable SHA-256 `hash`, and nullable POSIX `mode`. Kind values are `file` and `absent`; change values are `unchanged`, `modified`, `created`, and `deleted`.
+ 
+diff --git a/lib/src/checkpoint_models.dart b/lib/src/checkpoint_models.dart
+index d7ba6b2048e15ebe3b767516322ebc3607f7cd78..6c7aa696a389de43245765ac73b9a20b23994f13 100644
+--- a/lib/src/checkpoint_models.dart
++++ b/lib/src/checkpoint_models.dart
+@@ -27,6 +27,37 @@ CheckpointChangeKind? checkpointChangeKindFromText(String? value) =>
+         ),
+       );
+ 
++/// Which coding-agent turn a checkpoint brackets. Recorded by agent hooks;
++/// null for manual and Haven checkpoints.
++class CheckpointAgentContext {
++  final String agent;
++  final String? sessionId;
++  final String? turnId;
++  final String? transcriptPath;
++
++  /// Transcript size and SHA-256 of the bytes read when the checkpoint closed.
++  final int? transcriptBytes;
++  final String? transcriptSha256;
++
++  const CheckpointAgentContext({
++    required this.agent,
++    this.sessionId,
++    this.turnId,
++    this.transcriptPath,
++    this.transcriptBytes,
++    this.transcriptSha256,
++  });
++
++  Map<String, Object?> toJson() => {
++    'name': agent,
++    'sessionId': sessionId,
++    'turnId': turnId,
++    'transcriptPath': transcriptPath,
++    'transcriptBytes': transcriptBytes,
++    'transcriptSha256': transcriptSha256,
++  };
++}
++
+ class CheckpointRecord {
+   final String id;
+   final String? label;
+@@ -39,6 +70,7 @@ class CheckpointRecord {
+   final String policyFingerprint;
+   final int fatalErrorCount;
+   final int exclusionCount;
++  final CheckpointAgentContext? agent;
+ 
+   const CheckpointRecord({
+     required this.id,
+@@ -52,6 +84,7 @@ class CheckpointRecord {
+     required this.policyFingerprint,
+     required this.fatalErrorCount,
+     required this.exclusionCount,
++    this.agent,
+   });
+ 
+   Map<String, Object?> toJson() => {
+@@ -66,6 +99,7 @@ class CheckpointRecord {
+     'policyFingerprint': policyFingerprint,
+     'fatalErrorCount': fatalErrorCount,
+     'exclusionCount': exclusionCount,
++    'agent': agent?.toJson(),
+   };
+ }
+ 
+diff --git a/lib/src/checkpoint_repository.dart b/lib/src/checkpoint_repository.dart
+index 5b17573ff15760c4b48e909fd744b81faadfb46f..6dda2510e9db77627594458132897dacfe8b1581 100644
+--- a/lib/src/checkpoint_repository.dart
++++ b/lib/src/checkpoint_repository.dart
+@@ -42,15 +42,45 @@ class CheckpointRepository {
+     required String source,
+     required int createdAt,
+     required String policyFingerprint,
++    CheckpointAgentContext? agent,
+   }) {
+     database.db.execute(
+       '''
+       INSERT INTO checkpoints
+         (id, label, source, status, manifest_version, created_at,
+-         policy_fingerprint, fatal_error_count, exclusion_count)
+-      VALUES (?, ?, ?, 'creating', 1, ?, ?, 0, 0)
++         policy_fingerprint, fatal_error_count, exclusion_count,
++         agent, agent_session_id, agent_turn_id, agent_transcript_path)
++      VALUES (?, ?, ?, 'creating', 1, ?, ?, 0, 0, ?, ?, ?, ?)
+       ''',
+-      [id, label, source, createdAt, policyFingerprint],
++      [
++        id,
++        label,
++        source,
++        createdAt,
++        policyFingerprint,
++        agent?.agent,
++        agent?.sessionId,
++        agent?.turnId,
++        agent?.transcriptPath,
++      ],
++    );
++  }
++
++  /// Record the agent transcript observed at close. A null [bytes] or
++  /// [sha256] means the transcript could not be read.
++  void setAgentTranscript(
++    String id, {
++    required String? path,
++    required int? bytes,
++    required String? sha256,
++  }) {
++    database.db.execute(
++      '''
++      UPDATE checkpoints SET agent_transcript_path = ?,
++        agent_transcript_bytes = ?, agent_transcript_sha256 = ?
++      WHERE id = ? AND agent IS NOT NULL
++      ''',
++      [path, bytes, sha256, id],
+     );
+   }
+ 
+@@ -279,6 +309,16 @@ class CheckpointRepository {
+     policyFingerprint: row['policy_fingerprint'] as String,
+     fatalErrorCount: row['fatal_error_count'] as int,
+     exclusionCount: row['exclusion_count'] as int,
++    agent: row['agent'] == null
++        ? null
++        : CheckpointAgentContext(
++            agent: row['agent'] as String,
++            sessionId: row['agent_session_id'] as String?,
++            turnId: row['agent_turn_id'] as String?,
++            transcriptPath: row['agent_transcript_path'] as String?,
++            transcriptBytes: row['agent_transcript_bytes'] as int?,
++            transcriptSha256: row['agent_transcript_sha256'] as String?,
++          ),
+   );
+ 
+   CheckpointFileRecord _file(dynamic row) => CheckpointFileRecord(
+diff --git a/lib/src/checkpoint_service.dart b/lib/src/checkpoint_service.dart
+index 261c28175ca09c24aca333cb5d90013ebdb0e741..817fdc598fd4b862d0e41160b20ba019fb94ce8f 100644
+--- a/lib/src/checkpoint_service.dart
++++ b/lib/src/checkpoint_service.dart
+@@ -1018,14 +1018,25 @@ class CheckpointService {
+   }
+ }
+ 
++/// Human-readable agent context for a checkpoint's JSON `agent` object.
++List<String> checkpointAgentLines(Map<dynamic, dynamic> agent) {
++  final bytes = agent['transcriptBytes'];
++  final sha256 = agent['transcriptSha256'];
++  return [
++    'Agent: ${agent['name']}; session: ${agent['sessionId'] ?? '(unknown)'}; turn: ${agent['turnId'] ?? '(unknown)'}',
++    'Transcript: ${agent['transcriptPath'] ?? '(unknown)'}${bytes == null ? '' : ' ($bytes bytes, sha256 $sha256)'}',
++  ];
++}
++
+ List<String> checkpointHumanLines(CommandResult result) {
+   final lines = <String>[];
+   final checkpoints = result.data['checkpoints'];
+   if (checkpoints is List) {
+     lines.add('[DMC] Checkpoints: ${checkpoints.length}');
+     for (final item in checkpoints.whereType<Map>()) {
++      final agent = item['agent'];
+       lines.add(
+-        '${item['id']}  ${item['status']}  ${item['changedFileCount'] ?? 0} changed  ${item['label'] ?? '(no label)'}',
++        '${item['id']}  ${item['status']}  ${item['changedFileCount'] ?? 0} changed  ${item['label'] ?? '(no label)'}${agent is Map ? '  [${agent['name']}]' : ''}',
+       );
+     }
+   }
+@@ -1041,6 +1052,8 @@ List<String> checkpointHumanLines(CommandResult result) {
+       lines.add(
+         'Source: ${checkpoint['source']}; label: ${checkpoint['label'] ?? '(none)'}',
+       );
++      final agent = checkpoint['agent'];
++      if (agent is Map) lines.addAll(checkpointAgentLines(agent));
+     }
+     final files = result.data['files'];
+     if (files is List) {
+diff --git a/lib/src/database.dart b/lib/src/database.dart
+index 95c4647ca54981020a827be2f4d3826b0e50af6f..1659b0448a67286f35a16d52052a2e880d5486e0 100644
+--- a/lib/src/database.dart
++++ b/lib/src/database.dart
+@@ -11,7 +11,7 @@ bool isTombstoneSnapshot({required String hash, required String snapshotPath}) {
+ 
+ /// Database manager for DMC's SQLite storage
+ class DmcDatabase {
+-  static const schemaVersion = 3;
++  static const schemaVersion = 4;
+   final String dbPath;
+   Database? _db;
+   Directory? _readCopy;
+@@ -89,6 +89,11 @@ class DmcDatabase {
+         if (version < 3) {
+           _migrateToVersion3();
+           db.execute('PRAGMA user_version = 3');
++          version = 3;
++        }
++        if (version < 4) {
++          _migrateToVersion4();
++          db.execute('PRAGMA user_version = 4');
+         }
+       });
+       _db!.execute('PRAGMA journal_mode = WAL');
+@@ -318,6 +323,26 @@ class DmcDatabase {
+     ''');
+   }
+ 
++  /// Agent-turn context for checkpoints begun by agent hooks. All columns are
++  /// nullable so existing checkpoints keep their meaning.
++  void _migrateToVersion4() {
++    final existing = {
++      for (final row in _db!.select('PRAGMA table_info(checkpoints)'))
++        row['name'] as String,
++    };
++    for (final column in [
++      'agent TEXT CHECK(agent IS NULL OR length(agent) > 0)',
++      'agent_session_id TEXT',
++      'agent_turn_id TEXT',
++      'agent_transcript_path TEXT',
++      'agent_transcript_bytes INTEGER CHECK(agent_transcript_bytes IS NULL OR agent_transcript_bytes >= 0)',
++      'agent_transcript_sha256 TEXT',
++    ]) {
++      if (existing.contains(column.split(' ').first)) continue;
++      _db!.execute('ALTER TABLE checkpoints ADD COLUMN $column');
++    }
++  }
++
+   /// Close the database connection
+   void close() {
+     _db?.close();
+diff --git a/lib/src/status.dart b/lib/src/status.dart
+index 9209324c0f6d832d584d745e319db7acecdd9f9f..3a6b5cec2f0487b4fa1ff545051591a4a242acaf 100644
+--- a/lib/src/status.dart
++++ b/lib/src/status.dart
+@@ -31,6 +31,7 @@ Future<int> showStatus({
+   var dbSizeBytes = 0;
+   var totalSnapshots = 0;
+   String? checkpointSummary;
++  String? agentSummary;
+   String? operationSummary;
+   if (dmcDirExists) {
+     final dbFile = File(paths.dbPath);
+@@ -48,6 +49,11 @@ Future<int> showStatus({
+       final view = checkpoints.getView(checkpoint.id)!;
+       checkpointSummary =
+           '${checkpoint.id} (${checkpoint.status.name}; ${view.protectedFileCount} protected, ${view.changedFileCount} changed, ${checkpoint.exclusionCount} excluded, ${checkpoint.fatalErrorCount} fatal)';
++      final agent = checkpoint.agent;
++      if (agent != null) {
++        agentSummary =
++            '${agent.agent} (session ${agent.sessionId ?? 'unknown'}, turn ${agent.turnId ?? 'unknown'})';
++      }
+     }
+     final incomplete = CheckpointOperationRepository(db).incomplete();
+     if (incomplete.isNotEmpty) {
+@@ -80,6 +86,7 @@ Future<int> showStatus({
+   print('DB size bytes: $dbSizeBytes');
+   print('Total snapshots: $totalSnapshots');
+   print('Checkpoint: ${checkpointSummary ?? 'none'}');
++  if (agentSummary != null) print('Checkpoint agent: $agentSummary');
+   print('Incomplete checkpoint operation: ${operationSummary ?? 'none'}');
+   print('Retention hours: ${config.retentionHours}');
+   print('Max file size KB: ${config.maxFileSizeKb}');
+diff --git a/test/migration_test.dart b/test/migration_test.dart
+index 7ae3b10d72d177c7b7052670a329378852e5f5f0..985d16f9986ca9fae896ae5b3dc39e4176361198 100644
+--- a/test/migration_test.dart
++++ b/test/migration_test.dart
+@@ -46,7 +46,7 @@ void main() {
+         ..writeAsStringSync('new work');
+       final db = DmcDatabase(paths.dbPath)..initialize();
+       try {
+-        expect(db.db.select('PRAGMA user_version').first.values.first, 3);
++        expect(db.db.select('PRAGMA user_version').first.values.first, 4);
+         expect(db.db.select('PRAGMA foreign_keys').first.values.first, 1);
+         expect(db.db.select('PRAGMA synchronous').first.values.first, 2);
+         expect(db.getSnapshotById(42)!.hash, hash);
+@@ -160,7 +160,7 @@ void main() {
+       versionOne.close();
+ 
+       final migrated = DmcDatabase(paths.dbPath)..initialize();
+-      expect(migrated.db.select('PRAGMA user_version').single.values.first, 3);
++      expect(migrated.db.select('PRAGMA user_version').single.values.first, 4);
+       expect(migrated.getSnapshotById(7)!.filePath, 'keep.txt');
+       expect(
+         migrated.db.select(
+@@ -192,11 +192,14 @@ void main() {
+     versionTwo.execute('DROP TABLE checkpoint_operations');
+     versionTwo.execute('ALTER TABLE checkpoint_files DROP COLUMN before_mode');
+     versionTwo.execute('ALTER TABLE checkpoint_files DROP COLUMN after_mode');
++    for (final column in _agentColumns) {
++      versionTwo.execute('ALTER TABLE checkpoints DROP COLUMN $column');
++    }
+     versionTwo.execute('PRAGMA user_version = 2');
+     versionTwo.close();
+ 
+     final migrated = DmcDatabase(paths.dbPath)..initialize();
+-    expect(migrated.db.select('PRAGMA user_version').single.values.first, 3);
++    expect(migrated.db.select('PRAGMA user_version').single.values.first, 4);
+     expect(migrated.getHistoryCount(), 1);
+     expect(
+       migrated.db.select(
+@@ -207,6 +210,84 @@ void main() {
+     migrated.close();
+   });
+ 
++  test('version 3 vault gains agent context without rewriting checkpoints', () {
++    final initial = DmcDatabase(paths.dbPath)..initialize();
++    CheckpointRepository(initial).createCheckpoint(
++      id: 'cp_v3',
++      label: 'before agent hooks',
++      source: 'haven',
++      createdAt: 10,
++      policyFingerprint: 'policy',
++    );
++    CheckpointRepository(initial).finishClose(
++      'cp_v3',
++      valid: true,
++      closedAt: 11,
++      fatalErrors: 0,
++      exclusions: 0,
++    );
++    initial.close();
++    final versionThree = sqlite.sqlite3.open(paths.dbPath);
++    for (final column in _agentColumns) {
++      versionThree.execute('ALTER TABLE checkpoints DROP COLUMN $column');
++    }
++    versionThree.execute('PRAGMA user_version = 3');
++    versionThree.close();
++
++    final migrated = DmcDatabase(paths.dbPath)..initialize();
++    try {
++      expect(migrated.db.select('PRAGMA user_version').single.values.first, 4);
++      final columns = {
++        for (final row in migrated.db.select('PRAGMA table_info(checkpoints)'))
++          row['name'] as String,
++      };
++      expect(columns, containsAll(_agentColumns));
++      final repository = CheckpointRepository(migrated);
++      final existing = repository.getCheckpoint('cp_v3')!;
++      expect(existing.label, 'before agent hooks');
++      expect(existing.source, 'haven');
++      expect(existing.agent, isNull);
++      expect(existing.toJson()['agent'], isNull);
++
++      repository.createCheckpoint(
++        id: 'cp_v4',
++        label: 'agent turn',
++        source: 'muse-code',
++        createdAt: 20,
++        policyFingerprint: 'policy',
++        agent: const CheckpointAgentContext(
++          agent: 'muse-code',
++          sessionId: 'session-1',
++          turnId: 'turn-1',
++        ),
++      );
++      repository.setAgentTranscript(
++        'cp_v4',
++        path: '/transcript.jsonl',
++        bytes: 12,
++        sha256: 'abc',
++      );
++      repository.setAgentTranscript(
++        'cp_v3',
++        path: '/ignored.jsonl',
++        bytes: 1,
++        sha256: 'ignored',
++      );
++      final agent = repository.getCheckpoint('cp_v4')!.agent!;
++      expect(agent.toJson(), {
++        'name': 'muse-code',
++        'sessionId': 'session-1',
++        'turnId': 'turn-1',
++        'transcriptPath': '/transcript.jsonl',
++        'transcriptBytes': 12,
++        'transcriptSha256': 'abc',
++      });
++      expect(repository.getCheckpoint('cp_v3')!.agent, isNull);
++    } finally {
++      migrated.close();
++    }
++  });
++
+   test('newer schema is rejected without adding or rewriting tables', () {
+     final future = sqlite.sqlite3.open(paths.dbPath);
+     future.execute('PRAGMA user_version = 999');
+@@ -233,3 +314,12 @@ void main() {
+     }
+   });
+ }
++
++const _agentColumns = [
++  'agent',
++  'agent_session_id',
++  'agent_turn_id',
++  'agent_transcript_path',
++  'agent_transcript_bytes',
++  'agent_transcript_sha256',
++];

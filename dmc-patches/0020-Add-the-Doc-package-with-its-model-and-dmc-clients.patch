@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 15:37:35 -0500
+Subject: [PATCH 20/31] Add the Doc package with its model and dmc clients
+
+doc/ is a separate Dart package (dmc_doc, executable doc). dmc itself
+stays free of models; the root analyzer excludes doc/.
+
+- One OpenAI-compatible Chat Completions client (POST
+  {baseUrl}/chat/completions, GET {baseUrl}/models). It retries 429 and
+  5xx with exponential backoff and jitter (honouring Retry-After up to
+  30 s), has clear connect and response timeouts, keeps only
+  message.content (reasoning_content is dropped), and never puts the
+  API key in an error or log.
+- Provider rules: meta always sends reasoning_effort (default low,
+  never none) and max_completion_tokens, and never stop, n, logit_bias,
+  penalties, max_tokens or a temperature. baseten and local send
+  max_tokens.
+- Config in the user config dir (dmc-doc/config.json): providers
+  (meta https://api.meta.ai/v1 with MODEL_API_KEY, baseten
+  https://inference.baseten.co/v1 with BASETEN_API_KEY, local Ollama at
+  127.0.0.1:11434 with no key), published per-model prices, budgets
+  (meta $150, baseten $100), and role routing. usage.json records
+  tokens and cost per provider.
+- A dmc client that finds dmc via --dmc, DMC_BIN, then PATH, checks it
+  with capabilities --json --schema-version 1, skips Apple's
+  /usr/bin/dmc without running it and older dmc builds, and runs
+  commands with --json --schema-version 1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ analysis_options.yaml | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/analysis_options.yaml b/analysis_options.yaml
+index dee8927aafeb5d7cb0c31b6b36a6635c9c3439df..2518fa04150fded859e1cf64f44bf0dea5121bb7 100644
+--- a/analysis_options.yaml
++++ b/analysis_options.yaml
+@@ -19,9 +19,10 @@ include: package:lints/recommended.yaml
+ #   rules:
+ #     - camel_case_types
+ 
+-# analyzer:
+-#   exclude:
+-#     - path/to/excluded/files/**
++# Doc (doc/) is a separate package with its own analyzer run and tests.
++analyzer:
++  exclude:
++    - doc/**
+ 
+ # For more information about the core and recommended set of lints, see
+ # https://dart.dev/go/core-lints

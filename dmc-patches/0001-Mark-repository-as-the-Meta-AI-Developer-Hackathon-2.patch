@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Mon, 26 Oct 2026 17:48:34 +0000
+Subject: [PATCH 01/31] Mark repository as the Meta AI Developer Hackathon 2026
+ entry
+
+Add HACKATHON.md, which records the pre-existing baseline (tag
+pre-hackathon, commit d177c4b) and explains how to see the hackathon
+work. Add a README banner and point the clone instructions at this
+repository. Tell agents in CLAUDE.md to keep the history before the
+tag intact.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MNGmjsBb5tfxhPVcEszkd1
+---
+ CLAUDE.md | 5 +++++
+ README.md | 8 ++++++--
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 1f5d6efa8fb915b47b319b82cf522b8fe2854b02..d0bec889d42685af0e7e3357a4b27a929894148e 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -5,6 +5,11 @@ authoritative, current guide to dmc's architecture, phase status, safety rules,
+ database schema, commands, and verification gates. This file used to describe
+ the original single-table prototype; that description is obsolete.
+ 
++**This is the Meta AI Developer Hackathon 2026 repository.** Read
++**[HACKATHON.md](HACKATHON.md)** too. Everything up to the `pre-hackathon` tag is
++pre-existing dmc work; everything after it is hackathon work and must stay that way
++(never rewrite or squash history before the tag).
++
+ Quick reference (details in AGENTS.md):
+ 
+ ```bash
+diff --git a/README.md b/README.md
+index 90bf89ad83ed190784500955639d64d6246656e2..3df6a0a020426936fed9b591967b013820eef02d 100644
+--- a/README.md
++++ b/README.md
+@@ -1,5 +1,9 @@
+ # dmc
+ 
++> **Meta AI Developer Hackathon 2026 entry.** This repository is a hackathon build on top of
++> [dmc](https://github.com/EvilMetaMonkey/dmc). Everything up to the `pre-hackathon` tag (commit `d177c4b`)
++> existed before the event, and every commit after it is hackathon work. See [HACKATHON.md](HACKATHON.md).
++
+ Local file history for coding projects, including changes made by AI tools.
+ 
+ dmc runs beside your editor, records eligible file versions in a local `.dmc/` folder, and lets you inspect, restore, and redo a selected version. It does not require a model, an AI subscription, or Haven.
+@@ -38,8 +42,8 @@ On macOS/Linux, the executable is `bin/dmc`. If macOS resolves `dmc` to Apple's
+ You need repository access, this revision of the source, Git, and the Dart SDK. CI uses Dart **3.11.5**. The development changes must be published to the revision you check out; cloning an older main branch does not install them.
+ 
+ ```sh
+-git clone https://github.com/EvilMetaMonkey/dmc.git
+-cd dmc
++git clone https://github.com/EvilMetaMonkey/dmc-meta-hackathon.git
++cd dmc-meta-hackathon
+ dart pub get --enforce-lockfile
+ dart test
+ dart run tool/check_analyzer.dart

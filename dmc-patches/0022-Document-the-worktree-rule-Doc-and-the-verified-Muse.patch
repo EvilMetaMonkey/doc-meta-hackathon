@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 15:59:41 -0500
+Subject: [PATCH 22/31] Document the worktree rule, Doc and the verified Muse
+ model IDs
+
+doc/README.md covers Doc's boundary, commands, providers, roles,
+redaction, budgets and the facts verified on 2026-10-27 (meta and
+Baseten model IDs, Muse Spark Open's reasoning behaviour, latencies and
+costs). HACKATHON.md's model table adds Muse Spark Open on Baseten as
+the workhorse, with the real IDs. AGENTS.md records Doc's boundary and
+commands; README, CHANGELOG and STATUS.md are updated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md    | 12 ++++++++++++
+ CHANGELOG.md |  2 ++
+ README.md    |  1 +
+ 3 files changed, 15 insertions(+)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index ef134a75f192dbdea6c37a0d1ea07c00279cf192..665a9453a02bacc1815ea1714bc7727061b225d5 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -96,6 +96,14 @@ The most important product qualities are:
+ - Do not move large amounts of logic unless necessary to support a feature cleanly.
+ - Avoid introducing framework-like complexity into a small CLI tool.
+ - New features should fit the existing repo-local `.dmc/` model.
++- **Doc is a separate program.** `doc/` is its own Dart package (`dmc_doc`, executable `doc`) with
++  its own pubspec, `bin/doc.dart`, `lib/src/`, analyzer run and tests (the root analyzer excludes
++  `doc/**`). Every model call lives in Doc; dmc never runs a model. Doc talks to dmc only by
++  running the dmc executable with `--json --schema-version 1` (found via `--dmc`, `DMC_BIN`, then
++  `PATH`, and checked with `capabilities`, skipping Apple's `/usr/bin/dmc`). It never reads
++  `.dmc/`, imports dmc's Dart code, or writes workspace files; it writes only `config.json` and
++  `usage.json` in its user config directory. Secrets are redacted before any hosted call. See
++  `doc/README.md`.
+ 
+ ---
+ 
+@@ -269,6 +277,10 @@ Use `docs/TESTER-READINESS-AUDIT.md` as the original audit and the Phase 2/3 han
+ ---
+ 
+ ## Common Commands
++- Doc (from `doc/`): `dart run bin/doc.dart models [--check] [--available]`,
++  `dart run bin/doc.dart summarize <checkpoint-id> [--local] [--show-prompt] [--role-provider summary=baseten]`,
++  `dart run bin/doc.dart usage`. Its gate: `dart pub get --enforce-lockfile`,
++  `dart analyze --fatal-infos`, `DMC_TEST_BIN=../build/dmc/bundle/bin/dmc dart test --concurrency=1`.
+ - `dart run bin/dmc.dart init`
+ - `dart run bin/dmc.dart watch`
+ - `dart run bin/dmc.dart log`
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 33af89c4207a12c7d9abbe9548b425db758b66ad..0ee7d2b1e48aeb1b58bfba86ed645fda40b14d25 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,7 @@
+ ## Unreleased — Meta AI Developer Hackathon 2026
+ 
++- Keep agent hooks inside their own Git work tree. `muse -w` creates linked worktrees inside the repository (`<repo>/.muse/worktrees/<date>-<hex>`), so a hook there used to record the turn in the main work tree's vault. `dmc agent-hook` now records nothing, and warns on stderr, when the nearest `.git` marker above its cwd is below the `.dmc` root (a linked worktree, a nested repository or a submodule). It checks marker positions only, with no git process. Each worktree has its own vault and checkpoints after `dmc init` there. `status` and `doctor` show whether the workspace is a linked worktree, its main work tree, and which linked worktrees have a vault.
++- Add Doc, a separate companion program in `doc/` (package `dmc_doc`). It talks to dmc only through `--json --schema-version 1`. It has one OpenAI-compatible client for Meta (`api.meta.ai`), Baseten (Muse Spark Open) and a local server (Muse Glimmer), with retries, timeouts, one logged fallback, per-provider budgets and usage tracking, and a tested secret-redaction module. Commands: `doc models [--check] [--available]`, `doc summarize <checkpoint-id> [--local] [--show-prompt]` and `doc usage`. CI analyzes and tests `doc/`.
+ - Add `dmc agent-hook <muse-code|claude-code> <event>`: a UserPromptSubmit hook begins a checkpoint labelled with the prompt's first line, and Stop, StopFailure, SessionEnd (and Muse Code Interrupt) close it, but only when the same agent and session own it. A missed Stop is closed by the next prompt; a foreign active checkpoint is left alone with a stderr warning. The command always exits 0, prints nothing on stdout, retries a busy workspace lock for up to 5 seconds, and falls back to the session environment when stdin is empty or invalid.
+ - Add `dmc hooks install|uninstall|status --agent <agent> [--scope project|local|user] [--apply] [--dmc-command <command>]`. It previews the exact JSON change by default, merges idempotently, and removes only exact dmc entries.
+ - Add schema-version 4: nullable agent-turn context per checkpoint (agent, session, turn, transcript path, and transcript size/SHA-256 at close). Checkpoint JSON gains an additive `agent` object within machine schema 1; `checkpoint show`, `checkpoint list` and `status` print it.
+diff --git a/README.md b/README.md
+index b7f4bdedbee52f5fa6f1522029bb281aa0288ff5..e77bb65b54cfe8735d9b459893360110601b3d4d 100644
+--- a/README.md
++++ b/README.md
+@@ -195,6 +195,7 @@ These commands support diagnosis, interrupted recovery, integration, and storage
+ | `dmc checkpoint recover <operation-id> --rollback` | Returns every target to its captured pre-operation state. |
+ | `dmc checkpoint release <id>` | Explicitly abandons/purges retention pins while keeping small metadata. |
+ | `dmc checkpoint export <id> --to <dir> [--state before\|after]` | Writes the project as it was at a checkpoint (after state by default) to a new or empty directory outside the project, without touching the working copy. Only protected files are included: ignored dependencies such as `node_modules` are not. |
++| `doc summarize <id>` (in `doc/`) | Doc, the separate AI companion, summarizes a checkpoint in plain English. It reads dmc only through its JSON interface. See [doc/README.md](doc/README.md). |
+ | `dmc capabilities --json --schema-version 1` | Reports the stable Haven contract, schema versions, checkpoint commands, safety capabilities, and cancellation requirements. |
+ | `dmc gc --dry-run` | Previews removal of expired, unprotected history. |
+ | `dmc gc` | Removes that expired history. Stop the watcher and other dmc commands first. |

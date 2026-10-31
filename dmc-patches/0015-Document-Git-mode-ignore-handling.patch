@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 01:57:51 -0500
+Subject: [PATCH 15/31] Document Git-mode ignore handling
+
+AGENTS.md, README.md and the website's getting-started page describe the
+two modes (Git decides inside a Git work tree; the subset parser
+outside), the git_unavailable refusal, the fingerprinted ignore sources
+and the git_ignored restore guard. docs/AGENT-HOOKS.md notes git in the
+hook environment and re-times the prompt hook (176 ms median in Git
+mode). STATUS.md and CHANGELOG record the work, the dogfood and template
+runs, and the open question about turns that edit .gitignore.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md                                         | 12 ++++++++----
+ CHANGELOG.md                                      |  5 +++++
+ README.md                                         |  4 +++-
+ .../src/content/docs/docs/dmc/getting-started.md  | 15 ++++++++++++---
+ 4 files changed, 28 insertions(+), 8 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 2796b7d16a3c18e427d1f1c27fdc415bc296a2eb..ad94964d4a00cb562a39918d305bde59ccadff5f 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -111,10 +111,14 @@ The most important product qualities are:
+ - Checkpoint restore/redo previews by default and requires `--apply`. Never route checkpoint recovery through legacy burst/task/mark semantics. Stop the watcher and all writers before apply.
+ - An incomplete operation must be handled with `checkpoint recover <id> --resume|--rollback`; status and doctor expose these journals.
+ - Add `--preview` to inspect recovery targets and conflicts without changing the workspace or journal. Gate clients on `features.operationRecoveryPreview`. See `docs/RECOVERY-PREVIEW.md`.
+-- Default watcher ignore rules: `.git`, `.dmc`, `.dart_tool`, `build`, `node_modules`
+-- Root `.gitignore` and `.dmcignore` are loaded once when the watcher starts; restart after policy changes.
+-- Ignore support is an explicit subset: names, root anchoring, directory patterns, `*`, `**`, and `?`. Reject negation, character classes, Git escapes, and nested `.gitignore` in scanned directories; do not imply full Git compatibility.
+-- Empty lines and `#` comments are ignored. Scanning prunes ignored directories before descent and excludes all links below the root.
++- Default ignored directories: `.git`, `.dmc`, `.dart_tool`, `build`, `node_modules`. They apply in both modes below.
++- **Git mode** (the workspace root is inside a Git work tree, found by a `.git` entry at or above the root): Git decides what is ignored. The protected file list is `git -C <root> ls-files --cached --others --exclude-standard -z`, which honours nested `.gitignore`, negation, character classes, `.git/info/exclude`, `core.excludesFile`, and keeps tracked files in scope even when they match a pattern. DMC's default directories, `.dmcignore` (still the subset below), and the link, size and protected-path rules apply on top. Gitlinks, submodules and nested repositories are excluded (`nested_repository`). `lib/src/git_ignore.dart` and `scanWorkspace` in `lib/src/workspace_scan.dart` implement it; every scanner path (checkpoint begin/close/verification, `snap`, the watcher) uses that one list.
++- Git mode never falls back silently. If git is not on `PATH`, `/usr/bin`, `/opt/homebrew/bin`, `/usr/local/bin` (or `C:\Program Files\Git\cmd` on Windows), begin records `git_unavailable` and close fails with it while the checkpoint stays open; a failing git gives `git_failed`. `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and similar variables are stripped so Git sees the detected repository.
++- In Git mode the policy fingerprint (version 2) covers the mode, DMC's rules, and the SHA-256 of every ignore source Git reads: each effective `.gitignore` (including those above the root, and not those inside directories Git already ignores), `info/exclude` and `core.excludesFile`. Changing any of them mid-turn fails close with `policy_changed`, as before.
++- Checkpoint restore and redo ask `git check-ignore` about their targets and refuse any Git-ignored path (`git_ignored` conflict): they never create, overwrite or delete a Git-ignored file. The watcher batches its Git checks through one `git check-ignore --stdin -z` per drain, not one process per event.
++- **Outside Git**, ignore support is the explicit subset: root `.gitignore` and `.dmcignore` with names, root anchoring, directory patterns, `*`, `**`, and `?`. Reject negation, character classes, Git escapes, and nested `.gitignore` in scanned directories; do not imply full Git compatibility.
++- Both files are loaded once when the watcher starts; restart after policy changes. Empty lines and `#` comments are ignored. Scanning prunes ignored directories before descent and excludes all links below the root.
++- `status` and `doctor` print the active ignore policy; doctor reports one that cannot be loaded as an issue.
+ - Debounce delay: `500ms`
+ - Retention default: `168` hours; max file size default: `2048` KiB. Project `.dmc/config.json` overrides global `~/.dmcconfig`.
+ - Cleanup runs only through explicit `gc`, never automatically on watcher startup. Mark/audit references pin history; expired unprotected baselines can still be removed.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 118fc008931732eba9907bca7c1087d0c4b714fd..200ad1dbd30522d884d7b3265a2f3b9fe28e280d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -9,6 +9,11 @@
+ - Fix `dmc hooks uninstall` to restore the config file's original bytes: it drops a `hooks` object it emptied, keeps the file's layout and final newline, and deletes a file it left empty.
+ - Fix agent-hook close events so that a turn ID must match the active checkpoint's turn. A late async Muse Interrupt no longer closes the next turn's checkpoint.
+ - Fix an intermittent `dart test` failure: agent hook fixtures now resolve from the package root rather than the cwd.
++- Add Git-compatible ignore handling. Inside a Git work tree, Git decides what is ignored: the protected file list is `git ls-files --cached --others --exclude-standard`, so nested `.gitignore` files, negation, character classes, `.git/info/exclude`, `core.excludesFile` and tracked files that match a pattern all behave as in Git. DMC's default directories, `.dmcignore` (still the documented subset) and the link and size rules apply on top; submodules and nested repositories are excluded (`nested_repository`). Outside Git, the subset parser and its refusals are unchanged. Previously any workspace with a nested `.gitignore`, `!` or `[...]` (including this repository) could not be checkpointed.
++- Git mode never falls back silently: a Git work tree without a usable git records `git_unavailable` (or `git_failed`) at begin, and close fails with it while the checkpoint stays open.
++- The policy fingerprint in Git mode (version 2) covers the mode and every ignore source Git reads; editing any of them mid-turn fails close with `policy_changed`. `.gitignore` files that tools write into directories Git already ignores (pytest, venv) do not count.
++- Checkpoint restore and redo refuse Git-ignored targets with a `git_ignored` conflict, so they never create, overwrite or delete a Git-ignored file. The watcher checks Git once per drain (`git check-ignore --stdin -z`). `status` and `doctor` print the active ignore policy.
++- CI runs `dart test --concurrency=1`, the documented gate, which fixes the older-test `Directory.current` race.
+ 
+ ## 1.1.0-dev.5.1 — Unreleased
+ 
+diff --git a/README.md b/README.md
+index 3df6a0a020426936fed9b591967b013820eef02d..ae44b68ea694de31c2356cec787aa6e0a56af818 100644
+--- a/README.md
++++ b/README.md
+@@ -219,7 +219,9 @@ Task labels (`dmc task start "label"`, `dmc task end`), burst/task logs, and mar
+ 
+ Default exclusions include `.git/`, `.dmc/`, `.dart_tool/`, `build/`, and `node_modules/`. Links inside the project are excluded even if they point to another file inside it. Do not replace vault files or folders with symlinks.
+ 
+-dmc loads root `.gitignore` and `.dmcignore` files when it starts. Its ignore language is deliberately limited:
++**Inside a Git repository, Git decides what is ignored.** dmc asks Git for the file list (`git ls-files --cached --others --exclude-standard`), so nested `.gitignore` files, negation, character classes, `.git/info/exclude` and your global excludes file all work exactly as in Git, and tracked files stay protected even if they match a pattern. dmc's default exclusions, `.dmcignore` and the link and size rules then apply on top. Submodules and nested repositories are excluded. Git must be installed: if dmc cannot find or run it inside a Git repository, checkpoints stop with `git_unavailable` instead of guessing. Checkpoint restore and redo never create, overwrite or delete a Git-ignored file.
++
++**Outside a Git repository**, dmc loads root `.gitignore` and `.dmcignore` files when it starts. Its ignore language is deliberately limited, and `.dmcignore` uses the same limited language in both cases:
+ 
+ - Simple names, root-anchored paths beginning with `/`, directory patterns ending in `/`, `*`, `**`, and `?` are supported.
+ - `.dmcignore` also accepts backslashes as legacy path separators. Prefer `/` for portable new rules.
+diff --git a/website/src/content/docs/docs/dmc/getting-started.md b/website/src/content/docs/docs/dmc/getting-started.md
+index cf3e159dfd298c255bf6310588d2565ed68de62b..8d87aa74da0af980eb271e19b8fec805b8ba2648 100644
+--- a/website/src/content/docs/docs/dmc/getting-started.md
++++ b/website/src/content/docs/docs/dmc/getting-started.md
+@@ -62,9 +62,18 @@ present, then watches for changes with a 500 ms debounce. If status says
+ - **Excluded by default:** `.git/`, `.dmc/`, `.dart_tool/`, `build/`,
+   `node_modules/`, binaries, oversized files, and all links.
+ 
+-The ignore language is a deliberate subset (names, root anchoring, `/dir/`,
+-`*`, `**`, `?`). Negation and character classes are **rejected** rather than
+-silently accepted. Root `.gitignore` and `.dmcignore` are loaded when the
++**In a Git repository, Git decides what is ignored.** dmc protects exactly
++the files `git ls-files --cached --others --exclude-standard` lists: nested
++`.gitignore` files, negation, character classes and `.git/info/exclude` all
++work as in Git, and tracked files stay protected. The default exclusions and
++`.dmcignore` apply on top, and submodules are skipped. Git must be installed;
++if dmc can't run it, checkpoints stop with `git_unavailable` rather than
++guess. `dmc status` shows which mode is active.
++
++**Outside Git**, the ignore language is a deliberate subset (names, root
++anchoring, `/dir/`, `*`, `**`, `?`). Negation, character classes and nested
++`.gitignore` files are **rejected** rather than silently accepted.
++`.dmcignore` always uses this subset. Ignore files are loaded when the
+ watcher starts — restart after policy changes.
+ 
+ ## 4. Day-to-day commands

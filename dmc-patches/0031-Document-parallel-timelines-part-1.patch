@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Wed, 28 Oct 2026 21:40:45 -0500
+Subject: [PATCH 31/31] Document parallel timelines, part 1
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+doc/README.md describes doc timelines step by step, the Muse Code
+1.4.14 headless facts verified on the Mac (default approval and sandbox,
+--max-model-steps, the --json events), the cost estimate and the real
+bisect → timelines → pick run. HACKATHON.md marks Muse Code timelines and
+Wonder planning live; AGENTS.md, the CHANGELOG and STATUS.md are updated
+(Next: timelines part 2, Wonder judging and demo integration).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md    | 11 +++++++++++
+ CHANGELOG.md |  8 ++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 3471b0a30aae90364e9393b08d15663cd094a0d4..263d13ac662439ccafb4f46d231dcc22f63d3d8b 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -127,6 +127,15 @@ The most important product qualities are:
+   it into one Doc command, and that command runs in-process only after "Run it? [y/N]" (`--yes`
+   never answers it for restore or bisect). The WebSocket client is behind `TranscriptionClient`.
+   `--local` refuses it. Usage records billed audio seconds.
++- **Parallel timelines** (`doc timelines`, part 1) never touch the working copy or the main
++  vault. The base comes from `dmc checkpoint export`. Each timeline is a Git worktree under
++  Doc's data dir (outside the repo), on branch `doc/timeline/<run>/<k>`, with its own `dmc
++  init`. The planner (Muse Wonder) only proposes approaches, as validated JSON
++  (`parseTimelineApproaches`). Agents run as `muse exec … --max-model-steps N
++  --disable-web-tools --json` with Muse's default approval and sandbox (never `--yolo` or
++  `--disable-approval`). Results are committed on their branches and tested with bisect's probe
++  runner. `pick` prints git commands and runs nothing in the repository; `clean` removes
++  worktree folders, never branches. Wonder's judging is part 2.
+ - **`doc restore` only drives dmc.** It previews with `dmc checkpoint restore <id> --json`, applies
+   with `--apply` after the user agrees, never forces a conflict or recovery, then offers a lesson.
+   To show the model the undone work, Doc exports the checkpoint's states with
+@@ -321,6 +330,8 @@ Use `docs/TESTER-READINESS-AUDIT.md` as the original audit and the Phase 2/3 han
+   `dart run bin/doc.dart restore <checkpoint-id> [--yes] [--no-lesson]`,
+   `dart run bin/doc.dart restore "<request>" [--limit <n>] [--diff] [--yes] [--json]`,
+   `dart run bin/doc.dart talk [--file <audio>] [--yes]`, `dart run bin/doc.dart status`,
++  `dart run bin/doc.dart timelines "<task>" --test "<command>" [--from <cp> --state before|after] [--n 3] [--max-steps <n>]`,
++  `dart run bin/doc.dart timelines list|show <run>|pick <run> <k>|clean <run>`,
+   `dart run bin/doc.dart lesson draft --last-restore`,
+   `dart run bin/doc.dart bisect --test "<command>" [--setup …] [--link <dir>]… [--json]`. Its gate: `dart pub get --enforce-lockfile`,
+   `dart analyze --fatal-infos`, `DMC_TEST_BIN=../build/dmc/bundle/bin/dmc dart test --concurrency=1`.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 086d88ba799ad6313972ae323279d245ca954fe4..de4f27edeb5dccdc8eb958306bae82743749d5b5 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,13 @@
+ ## Unreleased — Meta AI Developer Hackathon 2026
+ 
++- Add `doc timelines "<task>" --test "<command>"`, parallel timelines part 1 (everything but Wonder's judging).
++  - The base is a dmc export of the latest closed checkpoint's after-state, or `--from <cp> --state before|after`; the working copy is never read.
++  - Muse Wonder (`planner` role) plans exactly N (`--n`, default 3) clearly different approaches as validated JSON (`response_format` schema, strict parsing, one retry), from the task, the matched lesson brief, the base checkpoint's label and changed files and a redacted file list.
++  - After one confirmation with a stated cost estimate, each approach gets a Git worktree under Doc's data dir (outside the repository) whose tree is exactly the base, committed as "timeline base: <cp> <state>", with its own dmc vault.
++  - N `muse exec` agents run in parallel with Muse Code's default approval and sandbox, `--max-model-steps`, `--disable-web-tools` and `--json`, a per-timeline timeout and status lines; Ctrl-C stops them all and keeps the worktrees.
++  - Each result is committed on `doc/timeline/<run>/<k>`, tested with bisect's runner (`--setup`, `--link`), and compared side by side (steps, time, cost from Muse's `run.usage`, files with +/− lines, tests). The run is saved as JSON (`--json`).
++  - `doc timelines pick` shows the diff and prints the git commands (patch + `git apply --3way`, or `git merge --no-ff`) and runs nothing in the repository; the others stay as archived branches. `list`, `show` and `clean` (worktree folders only, never branches). `--local` refuses it.
++- Move bisect's shell runner, output tail and `--link` handling into a shared probe runner (no behaviour change).
+ - Add `doc talk` (alias `doc hey`), "Hey Doc" push-to-talk with Muse Voice Transcribe. Nothing is recorded or sent until Space or Enter; the same key (or 30 seconds) stops, Esc cancels and sends nothing more, and the terminal is always restored. Audio is recorded with `rec` (SoX) or `ffmpeg` (AVFoundation) and streamed by Doc alone over Meta's realtime WebSocket as documented: the key in the handshake frame, 80 ms binary PCM16 frames paced in real time, `{"type":"endStream"}`, then `transcript` events (cumulative partials, then `final: true`). `--file <audio>` streams a recording at real-time pace (converted with sox or ffmpeg when needed). Recent file names are sent as recognition `keywords`.
+   - The redacted transcript is classified by the workhorse role as JSON (`response_format` schema, strict parsing, one retry), and `planVoiceAction` (pure) turns it into one Doc command: restore (the transcript goes to natural-language restore unchanged), summarize the latest checkpoint, lesson brief, lessons, bisect (test command from the per-workspace `bisectTest` config or asked for) or status. Doc asks "Run it? [y/N]" and runs the command in-process only on yes; `--yes` never answers it for restore or bisect. Unknown or low-confidence requests run nothing.
+   - `--local` refuses `doc talk`. Usage records billed audio seconds; the price is configurable per model (default $0.18 per hour, Meta's pricing page).

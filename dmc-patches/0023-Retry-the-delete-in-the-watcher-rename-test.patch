@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 20:45:01 -0500
+Subject: [PATCH 23/31] Retry the delete in the watcher rename test
+
+On Windows the watcher can still hold renamed.txt open for a capture
+when the test deletes it (errno 32, seen once in CI run 40540474040).
+The test now retries the delete for up to 2 seconds. Test-only change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ test/watcher_hardening_test.dart | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/test/watcher_hardening_test.dart b/test/watcher_hardening_test.dart
+index 794cc9ae0958eccd6fa82f16f2266c8baa9b2c13..47add25a12d0c2cb19c6b4aab7249fc88412efa2 100644
+--- a/test/watcher_hardening_test.dart
++++ b/test/watcher_hardening_test.dart
+@@ -39,6 +39,20 @@ class AlwaysChangingStore extends SnapshotStore {
+   }
+ }
+ 
++/// Delete [file], retrying briefly: on Windows the watcher may still have
++/// it open for a capture (errno 32, "used by another process").
++Future<void> deleteWithRetry(File file) async {
++  for (var attempt = 1; ; attempt++) {
++    try {
++      file.deleteSync();
++      return;
++    } on FileSystemException {
++      if (attempt >= 20) rethrow;
++      await Future<void>.delayed(const Duration(milliseconds: 100));
++    }
++  }
++}
++
+ void main() {
+   late Directory root;
+   late DmcPaths paths;
+@@ -152,7 +166,7 @@ void main() {
+             db.getLatestSnapshot(p.join('nested', 'child.txt'))?.hash ==
+                 tombstoneHash,
+       );
+-      moved.deleteSync();
++      await deleteWithRetry(moved);
+       await eventually(
+         () => db.getLatestSnapshot('renamed.txt')?.hash == tombstoneHash,
+       );

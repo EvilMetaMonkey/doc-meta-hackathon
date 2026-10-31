@@ -1,0 +1,1075 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 11:12:03 -0500
+Subject: [PATCH 16/31] Handle ignore-policy drift per file instead of
+ invalidating close
+
+When the ignore policy (any .gitignore Git reads, info/exclude,
+core.excludesFile, .dmcignore) or the config changes between begin and
+close, close now succeeds. The close-time policy decides what is
+protected, both fingerprints are recorded (closePolicyFingerprint), and
+a non-fatal policy_changed warning is added.
+
+Files whose protection changed are recorded per file (schema 5 adds the
+nullable checkpoint_files.scope_change and
+checkpoints.close_policy_fingerprint; existing rows are not rewritten):
+- left_scope: protected at begin, excluded at close (including a deleted
+  file that the close-time policy ignores). The before state is kept; no
+  after state is captured.
+- entered_scope: excluded at begin (it or a parent was recorded as an
+  exclusion), protected at close. It has no before state.
+
+Restore and redo list them under a new additive plan field, skipped, and
+never write them. Redo of an entered_scope file only confirms it still
+matches its after state; a changed file is a workspace_drift conflict.
+checkpoint show and the restore/redo preview print the new states. File
+entries gain an additive scope field; change stays null for them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/src/checkpoint_models.dart          |  34 +++
+ lib/src/checkpoint_plan.dart            |  62 +++++
+ lib/src/checkpoint_repository.dart      |  50 ++++-
+ lib/src/checkpoint_restore_service.dart |   9 +
+ lib/src/checkpoint_service.dart         |  86 +++++--
+ lib/src/database.dart                   |  31 ++-
+ lib/src/ignore.dart                     |  20 ++
+ test/checkpoint_test.dart               |  18 +-
+ test/git_ignore_test.dart               |  18 +-
+ test/migration_test.dart                |  67 +++++-
+ test/policy_drift_test.dart             | 286 ++++++++++++++++++++++++
+ 11 files changed, 643 insertions(+), 38 deletions(-)
+ create mode 100644 test/policy_drift_test.dart
+
+diff --git a/lib/src/checkpoint_models.dart b/lib/src/checkpoint_models.dart
+index 6c7aa696a389de43245765ac73b9a20b23994f13..2077848f8a181e83b99df86444117e0cce8b012e 100644
+--- a/lib/src/checkpoint_models.dart
++++ b/lib/src/checkpoint_models.dart
+@@ -4,6 +4,30 @@ enum CheckpointFileKind { file, absent }
+ 
+ enum CheckpointChangeKind { unchanged, modified, created, deleted }
+ 
++/// How a file's protection changed when the ignore policy changed between
++/// begin and close. Such files have a null change classification.
++enum CheckpointScopeChange {
++  /// In scope at begin, out of scope at close (newly ignored). The before
++  /// state is kept; there is no after state, and restore and redo skip it.
++  leftScope('left_scope'),
++
++  /// Out of scope at begin, in scope at close (newly un-ignored). There is no
++  /// before state (recorded as absent); restore never deletes or overwrites
++  /// it, and redo only confirms it still matches its after state.
++  enteredScope('entered_scope');
++
++  final String id;
++  const CheckpointScopeChange(this.id);
++
++  static CheckpointScopeChange? fromText(String? value) => value == null
++      ? null
++      : CheckpointScopeChange.values.firstWhere(
++          (scope) => scope.id == value,
++          orElse: () =>
++              throw FormatException('Unknown checkpoint scope change: $value'),
++        );
++}
++
+ CheckpointStatus checkpointStatusFromText(String value) =>
+     CheckpointStatus.values.firstWhere(
+       (status) => status.name == value,
+@@ -68,6 +92,11 @@ class CheckpointRecord {
+   final int? closedAt;
+   final int? releasedAt;
+   final String policyFingerprint;
++
++  /// The policy fingerprint at close; differs from [policyFingerprint] when
++  /// the ignore policy changed during the checkpoint. Null before close and
++  /// for checkpoints closed before schema 5.
++  final String? closePolicyFingerprint;
+   final int fatalErrorCount;
+   final int exclusionCount;
+   final CheckpointAgentContext? agent;
+@@ -82,6 +111,7 @@ class CheckpointRecord {
+     required this.closedAt,
+     required this.releasedAt,
+     required this.policyFingerprint,
++    this.closePolicyFingerprint,
+     required this.fatalErrorCount,
+     required this.exclusionCount,
+     this.agent,
+@@ -97,6 +127,7 @@ class CheckpointRecord {
+     'closedAt': closedAt,
+     'releasedAt': releasedAt,
+     'policyFingerprint': policyFingerprint,
++    'closePolicyFingerprint': closePolicyFingerprint,
+     'fatalErrorCount': fatalErrorCount,
+     'exclusionCount': exclusionCount,
+     'agent': agent?.toJson(),
+@@ -115,6 +146,7 @@ class CheckpointFileRecord {
+   final String? afterHash;
+   final int? afterMode;
+   final CheckpointChangeKind? changeKind;
++  final CheckpointScopeChange? scopeChange;
+ 
+   const CheckpointFileRecord({
+     required this.checkpointId,
+@@ -128,6 +160,7 @@ class CheckpointFileRecord {
+     required this.afterHash,
+     required this.afterMode,
+     required this.changeKind,
++    this.scopeChange,
+   });
+ 
+   Map<String, Object?> toJson() => {
+@@ -147,6 +180,7 @@ class CheckpointFileRecord {
+             'mode': afterMode,
+           },
+     'change': changeKind?.name,
++    'scope': scopeChange?.id,
+   };
+ }
+ 
+diff --git a/lib/src/checkpoint_plan.dart b/lib/src/checkpoint_plan.dart
+index 1fa27b4eb7252db23ea3f31ef1feee6f226a80da..464ba896b2a7bd39c0e7aa42190b538f55cd663c 100644
+--- a/lib/src/checkpoint_plan.dart
++++ b/lib/src/checkpoint_plan.dart
+@@ -98,6 +98,11 @@ class CheckpointPlan {
+   final List<CheckpointPlanAction> actions;
+   final List<CheckpointPlanIssue> conflicts;
+   final List<CheckpointPlanIssue> dataErrors;
++
++  /// Files whose protection changed during the checkpoint (left_scope,
++  /// entered_scope). They are never written; listing them does not block
++  /// the plan.
++  final List<CheckpointPlanIssue> skipped;
+   final CheckpointPlanIssue? checkpointError;
+ 
+   const CheckpointPlan({
+@@ -106,6 +111,7 @@ class CheckpointPlan {
+     this.actions = const [],
+     this.conflicts = const [],
+     this.dataErrors = const [],
++    this.skipped = const [],
+     this.checkpointError,
+   });
+ 
+@@ -127,6 +133,7 @@ class CheckpointPlan {
+     'actions': actions.map((action) => action.toJson()).toList(),
+     'conflicts': conflicts.map((issue) => issue.toJson()).toList(),
+     'dataErrors': dataErrors.map((issue) => issue.toJson()).toList(),
++    'skipped': skipped.map((issue) => issue.toJson()).toList(),
+   };
+ }
+ 
+@@ -190,8 +197,16 @@ class CheckpointPlanner {
+     final actions = <CheckpointPlanAction>[];
+     final conflicts = <CheckpointPlanIssue>[];
+     final dataErrors = <CheckpointPlanIssue>[];
++    final skipped = <CheckpointPlanIssue>[];
+     var sequence = 0;
+     for (final file in checkpoints.getFiles(checkpointId)) {
++      if (file.scopeChange != null) {
++        final issue = _scopeChangeIssue(file, direction);
++        if (issue != null) {
++          (issue.code == 'workspace_drift' ? conflicts : skipped).add(issue);
++        }
++        continue;
++      }
+       if (file.changeKind == null ||
+           file.changeKind == CheckpointChangeKind.unchanged ||
+           file.afterKind == null) {
+@@ -295,9 +310,56 @@ class CheckpointPlanner {
+       actions: actions,
+       conflicts: conflicts,
+       dataErrors: dataErrors,
++      skipped: skipped,
+     );
+   }
+ 
++  /// Files whose protection changed are never written. Redo checks that an
++  /// entered_scope file still matches its recorded after state, which is
++  /// already the redo result; a changed file is a conflict.
++  CheckpointPlanIssue? _scopeChangeIssue(
++    CheckpointFileRecord file,
++    CheckpointOperationDirection direction,
++  ) {
++    switch (file.scopeChange!) {
++      case CheckpointScopeChange.leftScope:
++        return CheckpointPlanIssue(
++          'left_scope',
++          'Protected at begin but excluded by the ignore policy at close. Its before state is kept; ${direction.name} leaves it untouched.',
++          path: file.filePath,
++        );
++      case CheckpointScopeChange.enteredScope:
++        if (direction == CheckpointOperationDirection.restore) {
++          return CheckpointPlanIssue(
++            'entered_scope',
++            'Excluded at begin and protected at close, so it has no before state. Restore never deletes or overwrites it.',
++            path: file.filePath,
++          );
++        }
++        try {
++          final current = readWorkspaceState(paths, file.filePath);
++          if (current.matches(
++            file.afterKind ?? CheckpointFileKind.absent,
++            file.afterHash,
++            file.afterMode,
++          )) {
++            return CheckpointPlanIssue(
++              'entered_scope',
++              'Excluded at begin; it still matches its recorded after state, so redo leaves it as it is.',
++              path: file.filePath,
++            );
++          }
++        } catch (_) {
++          // Fall through: an unreadable target is never written.
++        }
++        return CheckpointPlanIssue(
++          'workspace_drift',
++          'Entered protection during the checkpoint and has changed since; redo will not overwrite it.',
++          path: file.filePath,
++        );
++    }
++  }
++
+   CheckpointPlanIssue? _verifySnapshot(
+     String filePath,
+     int? snapshotId,
+diff --git a/lib/src/checkpoint_repository.dart b/lib/src/checkpoint_repository.dart
+index 6dda2510e9db77627594458132897dacfe8b1581..bc9c0f4a3d1e35ac02db4a66f5d0b2fadd7e426c 100644
+--- a/lib/src/checkpoint_repository.dart
++++ b/lib/src/checkpoint_repository.dart
+@@ -139,6 +139,39 @@ class CheckpointRepository {
+     );
+   }
+ 
++  /// A file protected at begin that the close-time policy no longer covers.
++  void setLeftScope({required String checkpointId, required String filePath}) {
++    database.db.execute(
++      '''
++      UPDATE checkpoint_files
++      SET after_kind = NULL, after_snapshot_id = NULL, after_hash = NULL,
++          after_mode = NULL, change_kind = NULL, scope_change = 'left_scope'
++      WHERE checkpoint_id = ? AND file_path = ?
++      ''',
++      [checkpointId, filePath],
++    );
++  }
++
++  /// A file the close-time policy covers but the begin-time policy excluded.
++  /// It has no before state.
++  void addEnteredScopeFile({
++    required String checkpointId,
++    required String filePath,
++    required int snapshotId,
++    required String hash,
++    required int? mode,
++  }) {
++    database.db.execute(
++      '''
++      INSERT INTO checkpoint_files
++        (checkpoint_id, file_path, before_kind, after_kind,
++         after_snapshot_id, after_hash, after_mode, change_kind, scope_change)
++      VALUES (?, ?, 'absent', 'file', ?, ?, ?, NULL, 'entered_scope')
++      ''',
++      [checkpointId, filePath, snapshotId, hash, mode],
++    );
++  }
++
+   void setAfterAbsent({
+     required String checkpointId,
+     required String filePath,
+@@ -207,7 +240,7 @@ class CheckpointRepository {
+         UPDATE checkpoint_files
+         SET after_kind = NULL, after_snapshot_id = NULL, after_hash = NULL,
+             after_mode = NULL,
+-            change_kind = NULL
++            change_kind = NULL, scope_change = NULL
+         WHERE checkpoint_id = ?
+         ''',
+         [id],
+@@ -221,13 +254,22 @@ class CheckpointRepository {
+     required int closedAt,
+     required int fatalErrors,
+     required int exclusions,
++    String? closePolicyFingerprint,
+   }) {
+     database.db.execute(
+       '''
+       UPDATE checkpoints SET status = ?, closed_at = ?,
+-        fatal_error_count = ?, exclusion_count = ? WHERE id = ?
++        fatal_error_count = ?, exclusion_count = ?,
++        close_policy_fingerprint = ? WHERE id = ?
+       ''',
+-      [valid ? 'closed' : 'invalid', closedAt, fatalErrors, exclusions, id],
++      [
++        valid ? 'closed' : 'invalid',
++        closedAt,
++        fatalErrors,
++        exclusions,
++        closePolicyFingerprint,
++        id,
++      ],
+     );
+   }
+ 
+@@ -307,6 +349,7 @@ class CheckpointRepository {
+     closedAt: row['closed_at'] as int?,
+     releasedAt: row['released_at'] as int?,
+     policyFingerprint: row['policy_fingerprint'] as String,
++    closePolicyFingerprint: row['close_policy_fingerprint'] as String?,
+     fatalErrorCount: row['fatal_error_count'] as int,
+     exclusionCount: row['exclusion_count'] as int,
+     agent: row['agent'] == null
+@@ -335,6 +378,7 @@ class CheckpointRepository {
+     afterHash: row['after_hash'] as String?,
+     afterMode: row['after_mode'] as int?,
+     changeKind: checkpointChangeKindFromText(row['change_kind'] as String?),
++    scopeChange: CheckpointScopeChange.fromText(row['scope_change'] as String?),
+   );
+ 
+   CheckpointIssue _issue(dynamic row) => CheckpointIssue(
+diff --git a/lib/src/checkpoint_restore_service.dart b/lib/src/checkpoint_restore_service.dart
+index b63a176d0c24b61dcc494af95602710bdacbe90c..a4148f39b64f94c107f0f20e634207bf2840b5d7 100644
+--- a/lib/src/checkpoint_restore_service.dart
++++ b/lib/src/checkpoint_restore_service.dart
+@@ -968,6 +968,15 @@ List<String> checkpointOperationHumanLines(CommandResult result) {
+   }
+   final actions = data['actions'];
+   if (actions is List) lines.add('Files: ${actions.length}');
++  final skipped = data['skipped'];
++  if (skipped is List && skipped.isNotEmpty) {
++    lines.add(
++      'Skipped (protection changed during the checkpoint; never written): ${skipped.length}',
++    );
++    for (final item in skipped.whereType<Map>()) {
++      lines.add('  ${item['code']}: ${item['path']}');
++    }
++  }
+   final operationId = data['operationId'];
+   if (operationId != null) lines.add('Operation: $operationId');
+   for (final warning in result.warnings) {
+diff --git a/lib/src/checkpoint_service.dart b/lib/src/checkpoint_service.dart
+index 5833c8a09a62fc45ea0e8d920311928794222325..c600f5dbd0a371ad5e1c2761d3179ec12dde603b 100644
+--- a/lib/src/checkpoint_service.dart
++++ b/lib/src/checkpoint_service.dart
+@@ -350,7 +350,12 @@ class CheckpointService {
+       final policy = await _loadPolicy(paths);
+       repository.prepareClose(checkpointId);
+       final issues = repository.getIssues(checkpointId);
+-      if (policy.fingerprint != checkpoint.policyFingerprint) {
++      // Ignore-policy drift is handled per file instead of invalidating the
++      // checkpoint: the close-time policy decides what is protected now, and
++      // files whose protection changed are recorded as left_scope or
++      // entered_scope, which restore and redo never overwrite or delete.
++      final policyChanged = policy.fingerprint != checkpoint.policyFingerprint;
++      if (policyChanged) {
+         _addIssue(
+           repository,
+           issues,
+@@ -358,10 +363,21 @@ class CheckpointService {
+           phase: 'close',
+           code: 'policy_changed',
+           message:
+-              'Configuration or ignore policy changed after begin. Restore the original policy and begin a new checkpoint.',
+-          fatal: true,
++              'Configuration or ignore policy changed during the checkpoint. Files that left or entered protection are recorded per file, and restore and redo skip them.',
++          fatal: false,
+         );
+-      } else {
++      }
++      // Paths excluded at begin (ignored, linked, nested repositories). A
++      // file at or below one of them that is protected at close entered scope.
++      final excludedAtBegin = [
++        for (final issue in issues)
++          if (issue.phase == 'begin' && !issue.fatal && issue.filePath != null)
++            issue.filePath!,
++      ];
++      bool wasExcludedAtBegin(String relative) => excludedAtBegin.any(
++        (excluded) => excluded == relative || p.isWithin(excluded, relative),
++      );
++      {
+         final store = _storeFactory(database, paths.snapshotsPath);
+         final before = {
+           for (final file in repository.getFiles(checkpointId))
+@@ -411,7 +427,17 @@ class CheckpointService {
+             }
+             after[relative] = captured;
+             final prior = before[relative];
+-            if (prior == null) {
++            if (prior == null &&
++                policyChanged &&
++                wasExcludedAtBegin(relative)) {
++              repository.addEnteredScopeFile(
++                checkpointId: checkpointId,
++                filePath: relative,
++                snapshotId: captured.snapshotId,
++                hash: captured.hash,
++                mode: captured.mode,
++              );
++            } else if (prior == null) {
+               repository.addCreatedFile(
+                 checkpointId: checkpointId,
+                 filePath: relative,
+@@ -433,16 +459,35 @@ class CheckpointService {
+               );
+             }
+           }
+-          for (final relative in before.keys.where(
+-            (relative) => !after.containsKey(relative),
+-          )) {
+-            final absolute = p.join(paths.rootPath, relative);
+-            if (FileSystemEntity.typeSync(absolute, followLinks: false) ==
+-                FileSystemEntityType.notFound) {
++          final missing = [
++            for (final relative in before.keys)
++              if (!after.containsKey(relative)) relative,
++          ];
++          final gone = {
++            for (final relative in missing)
++              if (FileSystemEntity.typeSync(
++                    p.join(paths.rootPath, relative),
++                    followLinks: false,
++                  ) ==
++                  FileSystemEntityType.notFound)
++                relative,
++          };
++          // A deleted file the close-time policy no longer covers left scope:
++          // restoring it would create an ignored file.
++          final goneOutOfScope = policyChanged
++              ? await policy.ignore.outOfScope(gone)
++              : const <String>{};
++          for (final relative in missing) {
++            if (gone.contains(relative) && !goneOutOfScope.contains(relative)) {
+               repository.setAfterAbsent(
+                 checkpointId: checkpointId,
+                 filePath: relative,
+               );
++            } else if (policyChanged) {
++              repository.setLeftScope(
++                checkpointId: checkpointId,
++                filePath: relative,
++              );
+             }
+           }
+           await _verifyCurrentManifest(
+@@ -486,6 +531,7 @@ class CheckpointService {
+         closedAt: _now(),
+         fatalErrors: fatalCount,
+         exclusions: exclusionCount,
++        closePolicyFingerprint: policy.fingerprint,
+       );
+       checkpoint = repository.getCheckpoint(checkpointId)!;
+       return _viewResult(
+@@ -1167,11 +1213,19 @@ List<String> checkpointHumanLines(CommandResult result) {
+     final files = result.data['files'];
+     if (files is List) {
+       for (final file in files.whereType<Map>()) {
++        final scope = file['scope'];
+         if (result.command == 'checkpoint.show') {
+           final after = file['after'] as Map?;
+-          lines.add(
+-            '${file['path']}: ${file['change'] ?? 'protected'} (before ${(file['before'] as Map)['kind']}, after ${after?['kind'] ?? 'pending'})',
+-          );
++          lines.add(switch (scope) {
++            'left_scope' =>
++              '${file['path']}: left scope (before ${(file['before'] as Map)['kind']}, not captured at close; restore and redo skip it)',
++            'entered_scope' =>
++              '${file['path']}: entered scope (no before state, after ${after?['kind']}; restore never deletes or overwrites it)',
++            _ =>
++              '${file['path']}: ${file['change'] ?? 'protected'} (before ${(file['before'] as Map)['kind']}, after ${after?['kind'] ?? 'pending'})',
++          });
++        } else if (scope != null) {
++          lines.add('$scope: ${file['path']}');
+         } else if (file['change'] != null && file['change'] != 'unchanged') {
+           lines.add('${file['change']}: ${file['path']}');
+         }
+@@ -1180,7 +1234,9 @@ List<String> checkpointHumanLines(CommandResult result) {
+   }
+   for (final warning in result.warnings) {
+     lines.add(
+-      '[DMC] Excluded${warning.path == null ? '' : ' ${warning.path}'}: ${warning.message}',
++      warning.code == 'policy_changed'
++          ? '[DMC] Warning: ${warning.message}'
++          : '[DMC] Excluded${warning.path == null ? '' : ' ${warning.path}'}: ${warning.message}',
+     );
+   }
+   for (final error in result.errors) {
+diff --git a/lib/src/database.dart b/lib/src/database.dart
+index 1659b0448a67286f35a16d52052a2e880d5486e0..53a9012d4c0324406c49a2c9217df88b5937c886 100644
+--- a/lib/src/database.dart
++++ b/lib/src/database.dart
+@@ -11,7 +11,7 @@ bool isTombstoneSnapshot({required String hash, required String snapshotPath}) {
+ 
+ /// Database manager for DMC's SQLite storage
+ class DmcDatabase {
+-  static const schemaVersion = 4;
++  static const schemaVersion = 5;
+   final String dbPath;
+   Database? _db;
+   Directory? _readCopy;
+@@ -94,6 +94,11 @@ class DmcDatabase {
+         if (version < 4) {
+           _migrateToVersion4();
+           db.execute('PRAGMA user_version = 4');
++          version = 4;
++        }
++        if (version < 5) {
++          _migrateToVersion5();
++          db.execute('PRAGMA user_version = 5');
+         }
+       });
+       _db!.execute('PRAGMA journal_mode = WAL');
+@@ -343,6 +348,30 @@ class DmcDatabase {
+     }
+   }
+ 
++  /// Ignore-policy drift during a checkpoint: the close-time policy
++  /// fingerprint, and per-file scope changes. Nullable and additive; existing
++  /// rows are not rewritten.
++  void _migrateToVersion5() {
++    final checkpointColumns = {
++      for (final row in _db!.select('PRAGMA table_info(checkpoints)'))
++        row['name'] as String,
++    };
++    if (!checkpointColumns.contains('close_policy_fingerprint')) {
++      _db!.execute(
++        'ALTER TABLE checkpoints ADD COLUMN close_policy_fingerprint TEXT',
++      );
++    }
++    final fileColumns = {
++      for (final row in _db!.select('PRAGMA table_info(checkpoint_files)'))
++        row['name'] as String,
++    };
++    if (!fileColumns.contains('scope_change')) {
++      _db!.execute(
++        "ALTER TABLE checkpoint_files ADD COLUMN scope_change TEXT CHECK(scope_change IS NULL OR scope_change IN ('left_scope', 'entered_scope'))",
++      );
++    }
++  }
++
+   /// Close the database connection
+   void close() {
+     _db?.close();
+diff --git a/lib/src/ignore.dart b/lib/src/ignore.dart
+index ee68910c73864143c2926deb748f0f401ae9492d..49286fc0b2f4d26d7633cac99c4f3f9517b40cc9 100644
+--- a/lib/src/ignore.dart
++++ b/lib/src/ignore.dart
+@@ -185,6 +185,26 @@ class IgnorePolicy {
+ 
+   bool get gitMode => git != null;
+ 
++  /// The subset of [relativePaths] (native, relative to the workspace) that
++  /// this policy excludes: by DMC's rules, or, in Git mode, because Git
++  /// ignores them. Paths need not exist. One Git process at most.
++  Future<Set<String>> outOfScope(Iterable<String> relativePaths) async {
++    final paths = relativePaths.toList();
++    if (paths.isEmpty) return const {};
++    final excluded = {
++      for (final path in paths)
++        if (rules.any((rule) => rule.matches(path))) path,
++    };
++    if (git != null) {
++      excluded.addAll(
++        await git!.ignoredAmong(
++          paths.where((path) => !excluded.contains(path)),
++        ),
++      );
++    }
++    return excluded;
++  }
++
+   /// A one-line description for status and doctor.
+   String get description => git == null
+       ? 'dmc rules (not a Git work tree)'
+diff --git a/test/checkpoint_test.dart b/test/checkpoint_test.dart
+index f8333df2eaa888a0858b6a5b86c79bd0e5e6c665..b2aae4cf8bc16cedfb04b7da65fbb9e53a612843 100644
+--- a/test/checkpoint_test.dart
++++ b/test/checkpoint_test.dart
+@@ -226,7 +226,7 @@ void main() {
+   });
+ 
+   test(
+-    'one active checkpoint is enforced and policy drift invalidates close',
++    'one active checkpoint is enforced and policy drift is recorded at close',
+     () async {
+       File(p.join(root.path, 'notes.txt')).writeAsStringSync('before');
+       final first = await service.begin();
+@@ -237,10 +237,15 @@ void main() {
+       expect(second.errors.single.code, 'checkpoint_already_active');
+       File(p.join(root.path, '.dmcignore')).writeAsStringSync('generated/\n');
+       final close = await service.close(id);
+-      expect(close.exitCode, 3);
+-      expect((close.data['checkpoint'] as Map)['status'], 'invalid');
++      expect(close.exitCode, 0, reason: close.encode());
++      final closed = close.data['checkpoint'] as Map;
++      expect(closed['status'], 'closed');
++      expect(
++        closed['closePolicyFingerprint'],
++        isNot(closed['policyFingerprint']),
++      );
+       expect(
+-        close.errors.any((error) => error.code == 'policy_changed'),
++        close.warnings.any((warning) => warning.code == 'policy_changed'),
+         isTrue,
+       );
+     },
+@@ -398,10 +403,7 @@ void main() {
+       expect(beginJson['schemaVersion'], 1);
+       expect(beginJson['dmcVersion'], '1.1.0-dev.5.1');
+       expect(beginJson['exitCode'], 0);
+-      expect(
+-        beginJson['workspace']['path'],
+-        root.resolveSymbolicLinksSync(),
+-      );
++      expect(beginJson['workspace']['path'], root.resolveSymbolicLinksSync());
+       expect(beginJson['workspace']['fingerprint'], startsWith('sha256:'));
+       expect(beginJson['command'], 'checkpoint.begin');
+       expect(beginJson['ok'], isTrue);
+diff --git a/test/git_ignore_test.dart b/test/git_ignore_test.dart
+index d8541b3dbfe4c567d2c3331985ac64ddf482da00..cd2361203775dc9d6295833fa174063467d4dfe0 100644
+--- a/test/git_ignore_test.dart
++++ b/test/git_ignore_test.dart
+@@ -190,7 +190,7 @@ void main() {
+   });
+ 
+   test(
+-    'editing an ignore source mid-turn fails close as policy_changed',
++    'editing an ignore source mid-turn is recorded as policy_changed',
+     () async {
+       write('.gitignore', '*.log\n');
+       write('web/.gitignore', 'dist/\n');
+@@ -206,11 +206,11 @@ void main() {
+         final id = await begin();
+         edit();
+         final close = await service().close(id);
+-        expect(close.exitCode, 3, reason: close.encode());
+-        expect(
+-          records(id).issues.map((issue) => issue.code),
+-          contains('policy_changed'),
+-        );
++        expect(close.exitCode, 0, reason: close.encode());
++        final warning = records(
++          id,
++        ).issues.singleWhere((issue) => issue.code == 'policy_changed');
++        expect(warning.fatal, isFalse);
+       }
+     },
+   );
+@@ -229,6 +229,10 @@ void main() {
+       write('test_app.py', 'def test(): assert True');
+       final close = await service().close(id);
+       expect(close.exitCode, 0, reason: close.encode());
++      expect(
++        records(id).issues.map((issue) => issue.code),
++        isNot(contains('policy_changed')),
++      );
+       expect(
+         records(id).files
+             .where((file) => file.changeKind == CheckpointChangeKind.modified)
+@@ -240,7 +244,7 @@ void main() {
+       final next = await begin();
+       write('cache/.gitignore', '*\n');
+       final changed = await service().close(next);
+-      expect(changed.exitCode, 3, reason: changed.encode());
++      expect(changed.exitCode, 0, reason: changed.encode());
+       expect(
+         records(next).issues.map((issue) => issue.code),
+         contains('policy_changed'),
+diff --git a/test/migration_test.dart b/test/migration_test.dart
+index 985d16f9986ca9fae896ae5b3dc39e4176361198..9f2d044cd53a523d4ae9b88fa4244d66eb04fcb8 100644
+--- a/test/migration_test.dart
++++ b/test/migration_test.dart
+@@ -46,7 +46,10 @@ void main() {
+         ..writeAsStringSync('new work');
+       final db = DmcDatabase(paths.dbPath)..initialize();
+       try {
+-        expect(db.db.select('PRAGMA user_version').first.values.first, 4);
++        expect(
++          db.db.select('PRAGMA user_version').first.values.first,
++          DmcDatabase.schemaVersion,
++        );
+         expect(db.db.select('PRAGMA foreign_keys').first.values.first, 1);
+         expect(db.db.select('PRAGMA synchronous').first.values.first, 2);
+         expect(db.getSnapshotById(42)!.hash, hash);
+@@ -160,7 +163,10 @@ void main() {
+       versionOne.close();
+ 
+       final migrated = DmcDatabase(paths.dbPath)..initialize();
+-      expect(migrated.db.select('PRAGMA user_version').single.values.first, 4);
++      expect(
++        migrated.db.select('PRAGMA user_version').single.values.first,
++        DmcDatabase.schemaVersion,
++      );
+       expect(migrated.getSnapshotById(7)!.filePath, 'keep.txt');
+       expect(
+         migrated.db.select(
+@@ -199,7 +205,10 @@ void main() {
+     versionTwo.close();
+ 
+     final migrated = DmcDatabase(paths.dbPath)..initialize();
+-    expect(migrated.db.select('PRAGMA user_version').single.values.first, 4);
++    expect(
++      migrated.db.select('PRAGMA user_version').single.values.first,
++      DmcDatabase.schemaVersion,
++    );
+     expect(migrated.getHistoryCount(), 1);
+     expect(
+       migrated.db.select(
+@@ -210,6 +219,53 @@ void main() {
+     migrated.close();
+   });
+ 
++  test('version 4 vault gains policy-drift columns without rewriting rows', () {
++    final initial = DmcDatabase(paths.dbPath)..initialize();
++    CheckpointRepository(initial).createCheckpoint(
++      id: 'cp_v4',
++      label: 'before drift handling',
++      source: 'haven',
++      createdAt: 10,
++      policyFingerprint: 'policy',
++    );
++    CheckpointRepository(initial).finishClose(
++      'cp_v4',
++      valid: false,
++      closedAt: 11,
++      fatalErrors: 1,
++      exclusions: 0,
++    );
++    initial.close();
++    final versionFour = sqlite.sqlite3.open(paths.dbPath);
++    versionFour.execute(
++      'ALTER TABLE checkpoints DROP COLUMN close_policy_fingerprint',
++    );
++    versionFour.execute(
++      'ALTER TABLE checkpoint_files DROP COLUMN scope_change',
++    );
++    versionFour.execute('PRAGMA user_version = 4');
++    versionFour.close();
++
++    final migrated = DmcDatabase(paths.dbPath)..initialize();
++    try {
++      expect(migrated.db.select('PRAGMA user_version').single.values.first, 5);
++      final fileColumns = {
++        for (final row in migrated.db.select(
++          'PRAGMA table_info(checkpoint_files)',
++        ))
++          row['name'] as String,
++      };
++      expect(fileColumns, contains('scope_change'));
++      // An invalid checkpoint stays invalid; old rows gain only nulls.
++      final existing = CheckpointRepository(migrated).getCheckpoint('cp_v4')!;
++      expect(existing.status, CheckpointStatus.invalid);
++      expect(existing.closePolicyFingerprint, isNull);
++      expect(existing.toJson()['closePolicyFingerprint'], isNull);
++    } finally {
++      migrated.close();
++    }
++  });
++
+   test('version 3 vault gains agent context without rewriting checkpoints', () {
+     final initial = DmcDatabase(paths.dbPath)..initialize();
+     CheckpointRepository(initial).createCheckpoint(
+@@ -236,7 +292,10 @@ void main() {
+ 
+     final migrated = DmcDatabase(paths.dbPath)..initialize();
+     try {
+-      expect(migrated.db.select('PRAGMA user_version').single.values.first, 4);
++      expect(
++        migrated.db.select('PRAGMA user_version').single.values.first,
++        DmcDatabase.schemaVersion,
++      );
+       final columns = {
+         for (final row in migrated.db.select('PRAGMA table_info(checkpoints)'))
+           row['name'] as String,
+diff --git a/test/policy_drift_test.dart b/test/policy_drift_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b069a1c52283ffa1718dccab97f037d059b3241e
+--- /dev/null
++++ b/test/policy_drift_test.dart
+@@ -0,0 +1,286 @@
++import 'dart:io';
++
++import 'package:dmc/dmc.dart';
++import 'package:path/path.dart' as p;
++import 'package:test/test.dart';
++
++/// Ignore-policy drift during a checkpoint is handled per file: close
++/// succeeds, files whose protection changed are recorded as left_scope or
++/// entered_scope, and restore and redo never write them.
++void main() {
++  late Directory sandbox;
++  late Directory root;
++  late Directory home;
++
++  Future<void> git(List<String> args) async {
++    final result = await Process.run('git', [
++      '-c',
++      'core.autocrlf=false',
++      ...args,
++    ], workingDirectory: root.path);
++    expect(result.exitCode, 0, reason: '${result.stderr}');
++  }
++
++  File file(String relative) =>
++      File(p.joinAll([root.path, ...relative.split('/')]));
++
++  void write(String relative, String contents) => file(relative)
++    ..createSync(recursive: true)
++    ..writeAsStringSync(contents);
++
++  String? read(String relative) =>
++      file(relative).existsSync() ? file(relative).readAsStringSync() : null;
++
++  CheckpointService service() =>
++      CheckpointService(basePath: root.path, homePath: home.path);
++  CheckpointRestoreService restorer() =>
++      CheckpointRestoreService(basePath: root.path);
++
++  Future<String> begin() async {
++    final result = await service().begin(source: 'test');
++    expect(result.exitCode, 0, reason: result.encode());
++    return (result.data['checkpoint'] as Map)['id'] as String;
++  }
++
++  Future<CommandResult> close(String id) async {
++    final result = await service().close(id);
++    expect(result.exitCode, 0, reason: result.encode());
++    return result;
++  }
++
++  /// path → scope (or change, when the scope did not change).
++  Future<Map<String, String?>> manifest(String id) async {
++    final shown = await service().show(id);
++    return {
++      for (final entry in (shown.data['files'] as List).cast<Map>())
++        entry['path'] as String: (entry['scope'] ?? entry['change']) as String?,
++    };
++  }
++
++  Map<String, String> skippedOf(CommandResult plan) => {
++    for (final item in (plan.data['skipped'] as List).cast<Map>())
++      item['path'] as String: item['code'] as String,
++  };
++
++  Set<String> actionPaths(CommandResult plan) => {
++    for (final item in (plan.data['actions'] as List).cast<Map>())
++      item['path'] as String,
++  };
++
++  setUp(() async {
++    sandbox = Directory.systemTemp.createTempSync('dmc_policy_drift_');
++    root = Directory(p.join(sandbox.path, 'drift repo ü'))..createSync();
++    home = Directory(p.join(sandbox.path, 'home'))..createSync();
++  });
++
++  tearDown(() {
++    if (sandbox.existsSync()) sandbox.deleteSync(recursive: true);
++  });
++
++  group('in a Git work tree', () {
++    setUp(() async {
++      await git(['init', '-q', '.']);
++      await initDmc(basePath: root.path);
++    });
++
++    test('an added ignore line makes an existing file left_scope', () async {
++      write('.gitignore', '*.log\n');
++      write('notes.txt', 'notes before');
++      write('other.txt', 'other before');
++      final id = await begin();
++      // The agent ignores notes.txt, then keeps editing it and other files.
++      write('.gitignore', '*.log\nnotes.txt\n');
++      write('notes.txt', 'notes after');
++      write('other.txt', 'other after');
++      final closed = await close(id);
++      final summary = closed.data['checkpoint'] as Map;
++      expect(summary['status'], 'closed');
++      expect(
++        summary['closePolicyFingerprint'],
++        isNot(summary['policyFingerprint']),
++      );
++      expect(
++        closed.warnings.where((warning) => warning.code == 'policy_changed'),
++        hasLength(1),
++      );
++      expect(await manifest(id), {
++        '.gitignore': 'modified',
++        'notes.txt': 'left_scope',
++        'other.txt': 'modified',
++      });
++      final shown = await service().show(id);
++      final notes = (shown.data['files'] as List).cast<Map>().singleWhere(
++        (entry) => entry['path'] == 'notes.txt',
++      );
++      expect((notes['before'] as Map)['kind'], 'file');
++      expect(notes['after'], isNull);
++      expect(notes['change'], isNull);
++      expect(
++        checkpointHumanLines(shown),
++        contains(startsWith('notes.txt: left scope')),
++      );
++
++      final preview = await restorer().restore(id);
++      expect(preview.exitCode, 0, reason: preview.encode());
++      expect(preview.data['canApply'], isTrue);
++      expect(skippedOf(preview), {'notes.txt': 'left_scope'});
++      expect(actionPaths(preview), {'.gitignore', 'other.txt'});
++      expect(
++        checkpointOperationHumanLines(preview),
++        contains('  left_scope: notes.txt'),
++      );
++
++      final applied = await restorer().restore(id, apply: true);
++      expect(applied.exitCode, 0, reason: applied.encode());
++      expect(read('.gitignore'), '*.log\n');
++      expect(read('other.txt'), 'other before');
++      expect(read('notes.txt'), 'notes after');
++    });
++
++    test(
++      'a removed ignore line makes a file entered_scope; redo checks it',
++      () async {
++        write('.gitignore', '*.log\n');
++        write('app.txt', 'app before');
++        write('debug.log', 'log at begin');
++        final id = await begin();
++        write('.gitignore', '');
++        write('debug.log', 'log at close');
++        write('app.txt', 'app after');
++        await close(id);
++        expect(await manifest(id), {
++          '.gitignore': 'modified',
++          'app.txt': 'modified',
++          'debug.log': 'entered_scope',
++        });
++
++        final preview = await restorer().restore(id);
++        expect(skippedOf(preview), {'debug.log': 'entered_scope'});
++        final restored = await restorer().restore(id, apply: true);
++        expect(restored.exitCode, 0, reason: restored.encode());
++        expect(read('.gitignore'), '*.log\n');
++        expect(read('app.txt'), 'app before');
++        // Never deleted or overwritten by restore.
++        expect(read('debug.log'), 'log at close');
++
++        // Redo with the working file still at its recorded after state.
++        final redo = await restorer().redo(id, apply: true);
++        expect(redo.exitCode, 0, reason: redo.encode());
++        expect(skippedOf(redo), {'debug.log': 'entered_scope'});
++        expect(read('.gitignore'), '');
++        expect(read('app.txt'), 'app after');
++        expect(read('debug.log'), 'log at close');
++      },
++    );
++
++    test(
++      'redo refuses an entered_scope file that changed since close',
++      () async {
++        write('.gitignore', '*.log\n');
++        write('app.txt', 'app before');
++        write('debug.log', 'log at begin');
++        final id = await begin();
++        write('.gitignore', '');
++        write('debug.log', 'log at close');
++        write('app.txt', 'app after');
++        await close(id);
++        expect((await restorer().restore(id, apply: true)).exitCode, 0);
++        write('debug.log', 'edited after the restore');
++
++        final redo = await restorer().redo(id, apply: true);
++        expect(redo.exitCode, 4, reason: redo.encode());
++        expect(
++          ((redo.data['conflicts'] as List).single as Map)['path'],
++          'debug.log',
++        );
++        // Nothing was written.
++        expect(read('debug.log'), 'edited after the restore');
++        expect(read('app.txt'), 'app before');
++        expect(read('.gitignore'), '*.log\n');
++      },
++    );
++
++    test('a new nested .gitignore makes files left_scope', () async {
++      write('sub/a.txt', 'a before');
++      write('sub/b.txt', 'b before');
++      final id = await begin();
++      write('sub/.gitignore', 'b.txt\n');
++      write('sub/a.txt', 'a after');
++      write('sub/b.txt', 'b after');
++      await close(id);
++      final a = p.join('sub', 'a.txt');
++      final b = p.join('sub', 'b.txt');
++      final ignore = p.join('sub', '.gitignore');
++      expect(await manifest(id), {
++        ignore: 'created',
++        a: 'modified',
++        b: 'left_scope',
++      });
++
++      final preview = await restorer().restore(id);
++      expect(skippedOf(preview), {b: 'left_scope'});
++      expect(actionPaths(preview), {ignore, a});
++      final applied = await restorer().restore(id, apply: true);
++      expect(applied.exitCode, 0, reason: applied.encode());
++      expect(read('sub/.gitignore'), isNull);
++      expect(read('sub/a.txt'), 'a before');
++      expect(read('sub/b.txt'), 'b after');
++    });
++  });
++
++  test('.dmcignore edited mid-turn outside Git', () async {
++    await initDmc(basePath: root.path);
++    write('.dmcignore', 'generated/\n');
++    write('generated/model.txt', 'generated at begin');
++    write('secret.txt', 'secret before');
++    write('gone.txt', 'gone before');
++    write('plain.txt', 'plain before');
++    final id = await begin();
++    // Stop ignoring generated/, start ignoring secret.txt and gone.txt.
++    write('.dmcignore', 'secret.txt\ngone.txt\n');
++    write('secret.txt', 'secret after');
++    file('gone.txt').deleteSync();
++    write('plain.txt', 'plain after');
++    await close(id);
++    final model = p.join('generated', 'model.txt');
++    expect(await manifest(id), {
++      '.dmcignore': 'modified',
++      model: 'entered_scope',
++      'gone.txt': 'left_scope',
++      'plain.txt': 'modified',
++      'secret.txt': 'left_scope',
++    });
++
++    final preview = await restorer().restore(id);
++    expect(preview.data['canApply'], isTrue);
++    expect(skippedOf(preview), {
++      model: 'entered_scope',
++      'gone.txt': 'left_scope',
++      'secret.txt': 'left_scope',
++    });
++    final applied = await restorer().restore(id, apply: true);
++    expect(applied.exitCode, 0, reason: applied.encode());
++    expect(read('.dmcignore'), 'generated/\n');
++    expect(read('plain.txt'), 'plain before');
++    // Byte-identical: not restored, not recreated, not deleted.
++    expect(read('secret.txt'), 'secret after');
++    expect(read('gone.txt'), isNull);
++    expect(read('generated/model.txt'), 'generated at begin');
++  });
++
++  test('an unchanged policy records no drift and no scope changes', () async {
++    await initDmc(basePath: root.path);
++    write('a.txt', 'a');
++    final id = await begin();
++    write('a.txt', 'b');
++    final closed = await close(id);
++    final summary = closed.data['checkpoint'] as Map;
++    expect(summary['closePolicyFingerprint'], summary['policyFingerprint']);
++    expect(
++      closed.warnings.map((warning) => warning.code),
++      isNot(contains('policy_changed')),
++    );
++    expect(await manifest(id), {'a.txt': 'modified'});
++    expect(skippedOf(await restorer().restore(id)), isEmpty);
++  });
++}

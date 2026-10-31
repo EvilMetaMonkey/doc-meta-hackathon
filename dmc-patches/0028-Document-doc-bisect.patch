@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Wed, 28 Oct 2026 09:59:10 -0500
+Subject: [PATCH 28/31] Document doc bisect
+
+doc/README.md gains a Bisect section: how it searches and probes,
+dependencies (--link, --setup, suggestions), the result, the
+explanation, the restore offer, --json and a real six-turn run.
+AGENTS.md records the boundary (tests exports, never the working copy);
+CHANGELOG and STATUS.md are updated, and Next is natural-language
+restore.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md    | 7 ++++++-
+ CHANGELOG.md | 4 ++++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index d73d0d3d464c7cf584611b48bb282308f2f71e89..8dc59571cbb71737b37bc05a58aa1d1a0e1cfb3a 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -116,6 +116,10 @@ The most important product qualities are:
+   with `--apply` after the user agrees, never forces a conflict or recovery, then offers a lesson.
+   To show the model the undone work, Doc exports the checkpoint's states with
+   `dmc checkpoint export` into a temporary directory outside the workspace and diffs them there.
++- **`doc bisect` tests exports, never the working copy.** Each probe is a `dmc checkpoint export`
++  into a temporary folder outside the workspace, where `--setup` and `--test` run; the folders
++  are deleted unless `--keep`. The search (`bisectFirstBad`) is pure and deterministic. A model
++  only explains the result, and a restore is offered, never taken automatically.
+ - **Lessons are Doc-only.** dmc never sees them. Matching is a fixed file-overlap rule; models only
+   draft lessons (workhorse) and condense briefs (summary). Nothing enters the library without
+   `doc lesson approve`, and a brief reaches an agent only after the user agrees (`--yes` is for
+@@ -298,7 +302,8 @@ Use `docs/TESTER-READINESS-AUDIT.md` as the original audit and the Phase 2/3 han
+   `dart run bin/doc.dart usage`, `dart run bin/doc.dart lesson draft|edit|approve|reject|show|brief`,
+   `dart run bin/doc.dart lessons [path]`, `dart run bin/doc.dart start <muse-code|claude-code> "<task>"`,
+   `dart run bin/doc.dart restore <checkpoint-id> [--yes] [--no-lesson]`,
+-  `dart run bin/doc.dart lesson draft --last-restore`. Its gate: `dart pub get --enforce-lockfile`,
++  `dart run bin/doc.dart lesson draft --last-restore`,
++  `dart run bin/doc.dart bisect --test "<command>" [--setup …] [--link <dir>]… [--json]`. Its gate: `dart pub get --enforce-lockfile`,
+   `dart analyze --fatal-infos`, `DMC_TEST_BIN=../build/dmc/bundle/bin/dmc dart test --concurrency=1`.
+ - `dart run bin/dmc.dart init`
+ - `dart run bin/dmc.dart watch`
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 02cf77d3f76c0ca53b9abf6abb09575e6ad1e86f..67d798941e56cc2c383a2c2d39f92da7d6aa6530 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,9 @@
+ ## Unreleased — Meta AI Developer Hackathon 2026
+ 
++- Add `doc bisect --test "<command>"` (time-travel bisect). It tests exported checkpoint states, never the working copy, to find the first agent turn after which the tests fail.
++  - Candidates are closed agent turns from `dmc checkpoint list` (`--all`, `--from`, `--to`); invalid checkpoints are skipped. Both ends are checked first, then a binary search runs (about log2(n) probes), in a pure, tested function.
++  - Each probe is a `dmc checkpoint export` into a temporary folder, with optional `--setup`, a per-probe `--timeout` (a timeout is a failure), and `--link` for ignored dependency folders. Temporary folders are removed unless `--keep`.
++  - The result names the first bad turn, the last good point and the failing output. The workhorse role explains it from the redacted diff (unless `--no-explain`), then a restore is offered through the `doc restore` flow. `--json` prints one result object; `--yes` is for scripted demos only.
+ - Add `doc restore <checkpoint-id> [--yes] [--no-lesson]` (rollback without amnesia). It previews dmc's checkpoint restore in plain terms, asks, applies it through dmc's journaled restore, and never forces a conflict or interrupted restore. It then offers to draft a lesson from the undone work and asks, optionally, what went wrong. `--yes` is for scripted demos only.
+ - Add `doc lesson draft --last-restore`: it drafts from the most recent applied restore, found through dmc's existing schema 1 JSON (`checkpoint list` operations), skipping a restore that a later redo reapplied. No dmc change.
+ - Lesson drafts now include the abandoned work as a redacted line diff, built from `dmc checkpoint export` of the before and after states in a temporary directory outside the workspace. A label dmc truncated is marked as truncated, and the model is told never to quote or complete it.

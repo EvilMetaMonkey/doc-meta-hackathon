@@ -1,0 +1,1158 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 01:55:03 -0500
+Subject: [PATCH 12/31] Let Git decide what is ignored inside a Git work tree
+
+When the workspace root is inside a Git work tree, the protected file
+list is git ls-files --cached --others --exclude-standard (run with -C
+<root>, NUL-separated, converted to native paths). That honours nested
+.gitignore files, negation, character classes, info/exclude,
+core.excludesFile, and tracked files that match a pattern. DMC's default
+directories, .dmcignore, link and size rules still apply on top.
+Gitlinks, submodules and nested repositories are excluded.
+
+Git is required in that mode: if it cannot be found (PATH, then
+/usr/bin, /opt/homebrew/bin, /usr/local/bin, or Git for Windows) or run,
+begin records git_unavailable/git_failed and close leaves the checkpoint
+open, instead of falling back to the subset parser. Outside Git the
+subset parser and its refusals are unchanged.
+
+The policy fingerprint (version 2 in Git mode) covers the mode and every
+ignore source Git reads: the effective .gitignore files, info/exclude
+and core.excludesFile. A .gitignore that a tool writes into a directory
+Git already ignores (pytest, venv) is not a source.
+
+The watcher checks Git once per drain with git check-ignore --stdin -z,
+never per event. status and doctor print the ignore policy; doctor
+reports an unusable one as an issue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/dmc.dart                    |   1 +
+ lib/src/checkpoint_service.dart |  98 +++++---
+ lib/src/doctor.dart             |   4 +
+ lib/src/git_ignore.dart         | 383 ++++++++++++++++++++++++++++++++
+ lib/src/ignore.dart             |  87 +++++++-
+ lib/src/snap.dart               |   7 +-
+ lib/src/status.dart             |   6 +
+ lib/src/watcher.dart            |  57 ++++-
+ lib/src/workspace_scan.dart     | 156 +++++++++++++
+ 9 files changed, 747 insertions(+), 52 deletions(-)
+ create mode 100644 lib/src/git_ignore.dart
+
+diff --git a/lib/dmc.dart b/lib/dmc.dart
+index 0168847d66f5c5ee010f15316d57db9a5a8df684..a741ab4f7bd44797335e152b3f51498b0d30820e 100644
+--- a/lib/dmc.dart
++++ b/lib/dmc.dart
+@@ -14,6 +14,7 @@ export 'src/cli.dart';
+ export 'src/database.dart';
+ export 'src/diff.dart';
+ export 'src/gc.dart';
++export 'src/git_ignore.dart';
+ export 'src/hook_installer.dart';
+ export 'src/machine_output.dart';
+ export 'src/status.dart';
+diff --git a/lib/src/checkpoint_service.dart b/lib/src/checkpoint_service.dart
+index 88e61ff9ab01c8acdb92404143ae9ca14551caad..5833c8a09a62fc45ea0e8d920311928794222325 100644
+--- a/lib/src/checkpoint_service.dart
++++ b/lib/src/checkpoint_service.dart
+@@ -11,6 +11,7 @@ import 'checkpoint_repository.dart';
+ import 'config.dart';
+ import 'database.dart';
+ import 'file_policy.dart';
++import 'git_ignore.dart';
+ import 'ignore.dart';
+ import 'machine_output.dart';
+ import 'snapshot_store.dart';
+@@ -38,9 +39,13 @@ class CheckpointService {
+   final int Function() _now;
+   final String Function(int timestamp) _idGenerator;
+ 
++  /// Finds Git for Git-mode ignore handling; tests can make it fail.
++  final GitLocator? gitLocator;
++
+   CheckpointService({
+     this.basePath,
+     this.homePath,
++    this.gitLocator,
+     SnapshotStoreFactory? storeFactory,
+     int Function()? now,
+     String Function(int timestamp)? idGenerator,
+@@ -115,11 +120,7 @@ class CheckpointService {
+ 
+       final createdAt = _now();
+       checkpointId = _idGenerator(createdAt);
+-      late final ({
+-        DmcConfig config,
+-        List<IgnoreRule> rules,
+-        String fingerprint,
+-      })
++      late final ({DmcConfig config, IgnorePolicy ignore, String fingerprint})
+       policy;
+       try {
+         policy = await _loadPolicy(paths);
+@@ -138,7 +139,7 @@ class CheckpointService {
+             checkpointId: checkpointId,
+             phase: 'begin',
+             filePath: null,
+-            code: 'policy_invalid',
++            code: error is GitIgnoreException ? error.code : 'policy_invalid',
+             message: error.toString(),
+             fatal: true,
+           ),
+@@ -169,7 +170,7 @@ class CheckpointService {
+       final store = _storeFactory(database, paths.snapshotsPath);
+       final issues = <CheckpointIssue>[];
+       final before = <String, _CapturedFile>{};
+-      final scan = await scanWorkspace(paths, policy.rules);
++      final scan = await scanWorkspacePolicy(paths, policy.ignore);
+       _recordScanIssues(repository, checkpointId, 'begin', scan, issues);
+       if (scan.errors.isEmpty) {
+         for (final filePath in [...scan.files]..sort()) {
+@@ -200,7 +201,7 @@ class CheckpointService {
+         }
+         await _verifyCurrentManifest(
+           paths: paths,
+-          rules: policy.rules,
++          ignore: policy.ignore,
+           config: policy.config,
+           store: store,
+           expected: before,
+@@ -374,7 +375,7 @@ class CheckpointService {
+               ),
+         };
+         final after = <String, _CapturedFile>{};
+-        final scan = await scanWorkspace(paths, policy.rules);
++        final scan = await scanWorkspacePolicy(paths, policy.ignore);
+         _recordScanIssues(repository, checkpointId, 'close', scan, issues);
+         if (scan.errors.isEmpty) {
+           for (final filePath in [...scan.files]..sort()) {
+@@ -446,7 +447,7 @@ class CheckpointService {
+           }
+           await _verifyCurrentManifest(
+             paths: paths,
+-            rules: policy.rules,
++            ignore: policy.ignore,
+             config: policy.config,
+             store: store,
+             expected: after,
+@@ -502,6 +503,9 @@ class CheckpointService {
+           'Another checkpoint command is running in this workspace.',
+         );
+       }
++      if (error is GitIgnoreException) {
++        return machineFailure(command, 1, error.code, error.message);
++      }
+       return machineFailure(command, 1, 'close_failed', error.toString());
+     } finally {
+       database.close();
+@@ -692,29 +696,50 @@ class CheckpointService {
+     }
+   }
+ 
+-  Future<({DmcConfig config, List<IgnoreRule> rules, String fingerprint})>
++  /// The configuration and ignore policy, with a fingerprint that close
++  /// compares against begin. Outside Git it is unchanged from schema 1
++  /// (version 1). In Git mode (version 2) it also covers the mode and every
++  /// ignore source Git reads: the effective .gitignore files, info/exclude
++  /// and core.excludesFile.
++  Future<({DmcConfig config, IgnorePolicy ignore, String fingerprint})>
+   _loadPolicy(DmcPaths paths) async {
+     final config = await loadDmcConfig(
+       basePath: paths.rootPath,
+       homePath: homePath,
+     );
+-    final rules = await loadIgnoreRules(paths.rootPath, announce: false);
+-    final policy = jsonEncode({
+-      'version': 1,
+-      'maxFileSizeBytes': config.maxFileSizeBytes,
+-      'rules': [
+-        for (final rule in rules)
+-          {
+-            'pattern': rule.pattern,
+-            'directoryOnly': rule.directoryOnly,
+-            'matchAnywhere': rule.matchAnywhere,
+-            'hasWildcard': rule.hasWildcard,
+-          },
+-      ],
+-    });
++    final ignore = await loadIgnorePolicy(
++      paths.rootPath,
++      announce: false,
++      gitLocator: gitLocator,
++    );
++    final rules = [
++      for (final rule in ignore.rules)
++        {
++          'pattern': rule.pattern,
++          'directoryOnly': rule.directoryOnly,
++          'matchAnywhere': rule.matchAnywhere,
++          'hasWildcard': rule.hasWildcard,
++        },
++    ];
++    final git = ignore.git;
++    final policy = jsonEncode(
++      git == null
++          ? {
++              'version': 1,
++              'maxFileSizeBytes': config.maxFileSizeBytes,
++              'rules': rules,
++            }
++          : {
++              'version': 2,
++              'mode': 'git',
++              'maxFileSizeBytes': config.maxFileSizeBytes,
++              'rules': rules,
++              'gitSources': await git.ignoreSources(await git.list()),
++            },
++    );
+     return (
+       config: config,
+-      rules: rules,
++      ignore: ignore,
+       fingerprint: sha256.convert(utf8.encode(policy)).toString(),
+     );
+   }
+@@ -833,7 +858,7 @@ class CheckpointService {
+ 
+   Future<void> _verifyCurrentManifest({
+     required DmcPaths paths,
+-    required List<IgnoreRule> rules,
++    required IgnorePolicy ignore,
+     required DmcConfig config,
+     required SnapshotStore store,
+     required Map<String, _CapturedFile> expected,
+@@ -843,7 +868,7 @@ class CheckpointService {
+     required CheckpointRepository repository,
+     required List<CheckpointIssue> issues,
+   }) async {
+-    final verification = await scanWorkspace(paths, rules);
++    final verification = await scanWorkspacePolicy(paths, ignore);
+     _recordScanIssues(repository, checkpointId, phase, verification, issues);
+     if (verification.errors.isNotEmpty) return;
+     final actual = <String, _CapturedFile>{};
+@@ -943,10 +968,17 @@ class CheckpointService {
+         checkpointId: checkpointId,
+         phase: phase,
+         filePath: entry.key,
+-        code: entry.value == 'symlink' ? 'symlink' : 'ignored_path',
+-        message: entry.value == 'symlink'
+-            ? 'Symlinks are excluded from checkpoint protection.'
+-            : 'Path is excluded by checkpoint ignore policy.',
++        code: switch (entry.value) {
++          'symlink' => 'symlink',
++          nestedRepositoryExclusion => 'nested_repository',
++          _ => 'ignored_path',
++        },
++        message: switch (entry.value) {
++          'symlink' => 'Symlinks are excluded from checkpoint protection.',
++          nestedRepositoryExclusion =>
++            'Submodules and nested repositories are excluded from checkpoint protection.',
++          _ => 'Path is excluded by checkpoint ignore policy.',
++        },
+         fatal: false,
+       );
+     }
+@@ -959,6 +991,8 @@ class CheckpointService {
+         filePath: entry.key == '.' ? null : entry.key,
+         code: entry.value.contains('Nested .gitignore')
+             ? 'nested_ignore'
++            : entry.value.startsWith(gitScanErrorPrefix)
++            ? 'git_failed'
+             : 'scan_failed',
+         message: entry.value,
+         fatal: true,
+diff --git a/lib/src/doctor.dart b/lib/src/doctor.dart
+index 7bb92f11c329745280fc101b430ef4c7898e4d33..9ee76b446b0efecdda148edde0eff043376591bd 100644
+--- a/lib/src/doctor.dart
++++ b/lib/src/doctor.dart
+@@ -6,6 +6,7 @@ import 'checkpoint_repository.dart';
+ import 'checkpoint_operation_repository.dart';
+ import 'checkpoint_operation_models.dart';
+ import 'database.dart';
++import 'ignore.dart';
+ import 'snapshot_store.dart';
+ import 'workspace.dart';
+ import 'watcher_control.dart';
+@@ -186,6 +187,8 @@ Future<bool> runDoctor({String? basePath, String? homePath}) async {
+     print('Watcher errors: ${watcherErrors ?? {}}');
+     print('Excluded paths: ${health['exclusions'] ?? {}}');
+   }
++  final ignorePolicy = await describeIgnorePolicy(paths.rootPath);
++  print('Ignore policy: ${ignorePolicy.text}');
+   print('DB access: ok');
+   print('Database integrity: ${databaseCheck.join(', ')}');
+   print('Missing snapshot files: ${missingSnapshotFiles.length}');
+@@ -203,6 +206,7 @@ Future<bool> runDoctor({String? basePath, String? homePath}) async {
+ 
+   final hasIssues =
+       interrupted ||
++      !ignorePolicy.ok ||
+       (watcherErrors?.isNotEmpty ?? false) ||
+       missingSnapshotFiles.isNotEmpty ||
+       orphanedSnapshotFiles.isNotEmpty ||
+diff --git a/lib/src/git_ignore.dart b/lib/src/git_ignore.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..4383aa15ee060d06b191ffdde759a23bcd156319
+--- /dev/null
++++ b/lib/src/git_ignore.dart
+@@ -0,0 +1,383 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:crypto/crypto.dart';
++import 'package:path/path.dart' as p;
++
++/// Git-mode ignore handling. When the workspace root is inside a Git work
++/// tree, Git decides what is ignored; DMC never re-implements Git's rules.
++///
++/// Git is required in that mode. If it cannot be found or run, callers fail
++/// with [GitIgnoreException] instead of silently falling back to DMC's own
++/// subset parser.
++
++/// Finds a Git executable, or returns null.
++typedef GitLocator = String? Function();
++
++/// Raised when the workspace is a Git work tree but Git cannot decide what is
++/// ignored. [code] is a stable machine code.
++class GitIgnoreException implements Exception {
++  final String code;
++  final String message;
++
++  const GitIgnoreException(this.code, this.message);
++
++  @override
++  String toString() => message;
++}
++
++/// Environment variables that would point Git at a different repository,
++/// index or work tree than the one DMC detected.
++const List<String> _strippedGitEnvironment = [
++  'GIT_DIR',
++  'GIT_WORK_TREE',
++  'GIT_INDEX_FILE',
++  'GIT_COMMON_DIR',
++  'GIT_OBJECT_DIRECTORY',
++  'GIT_NAMESPACE',
++  'GIT_CEILING_DIRECTORIES',
++  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
++];
++
++/// Look for `git` on PATH, then in the usual install locations.
++String? locateGit({Map<String, String>? environment}) {
++  final env = environment ?? Platform.environment;
++  final names = Platform.isWindows ? const ['git.exe'] : const ['git'];
++  final pathValue = env['PATH'] ?? env['Path'] ?? '';
++  for (final directory in pathValue.split(Platform.isWindows ? ';' : ':')) {
++    if (directory.trim().isEmpty) continue;
++    for (final name in names) {
++      final candidate = p.join(directory.trim(), name);
++      if (_isExecutableFile(candidate)) return candidate;
++    }
++  }
++  final fallbacks = Platform.isWindows
++      ? [
++          for (final base in [
++            env['ProgramFiles'],
++            env['ProgramW6432'],
++            r'C:\Program Files',
++          ])
++            if (base != null) p.join(base, 'Git', 'cmd', 'git.exe'),
++          if (env['LOCALAPPDATA'] != null)
++            p.join(env['LOCALAPPDATA']!, 'Programs', 'Git', 'cmd', 'git.exe'),
++        ]
++      : const ['/usr/bin/git', '/opt/homebrew/bin/git', '/usr/local/bin/git'];
++  for (final candidate in fallbacks) {
++    if (_isExecutableFile(candidate)) return candidate;
++  }
++  return null;
++}
++
++bool _isExecutableFile(String path) {
++  try {
++    final stat = FileStat.statSync(path);
++    if (stat.type != FileSystemEntityType.file) return false;
++    return Platform.isWindows || stat.mode & 0x49 != 0;
++  } on FileSystemException {
++    return false;
++  }
++}
++
++/// The nearest `.git` directory or file at or above [root], or null when the
++/// root is not inside a Git work tree.
++String? findGitMarker(String root) {
++  var current = p.normalize(p.absolute(root));
++  while (true) {
++    final marker = p.join(current, '.git');
++    final type = FileSystemEntity.typeSync(marker, followLinks: false);
++    if (type == FileSystemEntityType.directory ||
++        type == FileSystemEntityType.file) {
++      return marker;
++    }
++    final parent = p.dirname(current);
++    if (parent == current) return null;
++    current = parent;
++  }
++}
++
++/// One `git ls-files` view of the workspace, as native relative paths.
++class GitFileListing {
++  /// Tracked files plus untracked files Git does not ignore. Entries that end
++  /// in a separator are untracked nested repositories.
++  final List<String> included;
++
++  /// Untracked paths Git ignores. Directory entries end in a separator.
++  final List<String> ignored;
++
++  const GitFileListing(this.included, this.ignored);
++}
++
++/// A workspace root inside a Git work tree, with the Git executable to ask.
++class GitWorkTree {
++  final String executable;
++  final String root;
++  final String topLevel;
++  final Map<String, String> _environment;
++
++  GitWorkTree._(this.executable, this.root, this.topLevel, this._environment);
++
++  /// Detect Git mode for [root]. Returns null outside a Git work tree, and
++  /// throws [GitIgnoreException] when the root is inside one but Git cannot
++  /// be run.
++  static Future<GitWorkTree?> detect(
++    String root, {
++    GitLocator? locator,
++    Map<String, String>? environment,
++  }) async {
++    final normalizedRoot = p.normalize(p.absolute(root));
++    final marker = findGitMarker(normalizedRoot);
++    if (marker == null) return null;
++    final executable = (locator ?? () => locateGit(environment: environment))();
++    if (executable == null) {
++      throw GitIgnoreException(
++        'git_unavailable',
++        'This workspace is inside a Git work tree (${p.dirname(marker)}), so Git decides what is ignored, but git was not found on PATH or in ${Platform.isWindows ? r'C:\Program Files\Git\cmd' : '/usr/bin, /opt/homebrew/bin or /usr/local/bin'}. Install Git or add it to PATH; DMC will not guess Git ignore rules.',
++      );
++    }
++    final env = {
++      for (final entry in (environment ?? Platform.environment).entries)
++        if (!_strippedGitEnvironment.contains(entry.key))
++          entry.key: entry.value,
++      'GIT_OPTIONAL_LOCKS': '0',
++      'GIT_TERMINAL_PROMPT': '0',
++    };
++    final probe = GitWorkTree._(executable, normalizedRoot, '', env);
++    final lines = const LineSplitter().convert(
++      await probe._runText([
++        'rev-parse',
++        '--is-inside-work-tree',
++        '--show-toplevel',
++      ]),
++    );
++    if (lines.length < 2 || lines[0].trim() != 'true') {
++      throw GitIgnoreException(
++        'git_failed',
++        'Git does not treat $normalizedRoot as part of a work tree, although ${p.dirname(marker)} has a .git entry. Fix the repository or remove the stray .git entry.',
++      );
++    }
++    // Git reports a canonical top level (macOS /private/var for /var, long
++    // Windows names). Express it in the same form as the root.
++    var topLevel = p.normalize(lines[1].trim());
++    try {
++      final canonicalRoot = Directory(
++        normalizedRoot,
++      ).resolveSymbolicLinksSync();
++      final upward = p.relative(topLevel, from: canonicalRoot);
++      if (upward == '.' || p.split(upward).every((part) => part == '..')) {
++        topLevel = p.normalize(p.join(normalizedRoot, upward));
++      }
++    } catch (_) {
++      // Keep Git's form (for example, on another drive).
++    }
++    return GitWorkTree._(executable, normalizedRoot, topLevel, env);
++  }
++
++  Future<ProcessResult> _run(List<String> args, {String? stdinText}) async {
++    try {
++      if (stdinText == null) {
++        return await Process.run(
++          executable,
++          ['-C', root, ...args],
++          environment: _environment,
++          includeParentEnvironment: false,
++          stdoutEncoding: utf8,
++          stderrEncoding: utf8,
++        );
++      }
++      final process = await Process.start(
++        executable,
++        ['-C', root, ...args],
++        environment: _environment,
++        includeParentEnvironment: false,
++      );
++      final stdout = process.stdout.transform(utf8.decoder).join();
++      final stderr = process.stderr.transform(utf8.decoder).join();
++      try {
++        process.stdin.add(utf8.encode(stdinText));
++        await process.stdin.close();
++      } catch (_) {
++        // Git exited before reading everything; its exit code says why.
++      }
++      return ProcessResult(
++        process.pid,
++        await process.exitCode,
++        await stdout,
++        await stderr,
++      );
++    } on ProcessException catch (error) {
++      throw GitIgnoreException(
++        'git_unavailable',
++        'Could not run $executable: ${error.message}',
++      );
++    }
++  }
++
++  Future<String> _runText(
++    List<String> args, {
++    Set<int> okExitCodes = const {0},
++    String? stdinText,
++  }) async {
++    final result = await _run(args, stdinText: stdinText);
++    if (!okExitCodes.contains(result.exitCode)) {
++      final detail = (result.stderr as String).trim();
++      throw GitIgnoreException(
++        'git_failed',
++        'git ${args.first} failed (exit ${result.exitCode})${detail.isEmpty ? '' : ': $detail'}',
++      );
++    }
++    return result.stdout as String;
++  }
++
++  static List<String> _nulList(String output) => [
++    for (final entry in output.split('\x00'))
++      if (entry.isNotEmpty) _toNative(entry),
++  ];
++
++  static String _toNative(String gitPath) {
++    final directory = gitPath.endsWith('/');
++    final native = p.joinAll(
++      p.posix.split(
++        directory ? gitPath.substring(0, gitPath.length - 1) : gitPath,
++      ),
++    );
++    return directory ? '$native${p.separator}' : native;
++  }
++
++  static String _toGit(String nativeRelative) =>
++      p.split(nativeRelative).join('/');
++
++  /// List the workspace the way Git sees it.
++  Future<GitFileListing> list() async {
++    final included = await _runText([
++      'ls-files',
++      '--cached',
++      '--others',
++      '--exclude-standard',
++      '-z',
++    ]);
++    final ignored = await _runText([
++      'ls-files',
++      '--others',
++      '--ignored',
++      '--exclude-standard',
++      '--directory',
++      '-z',
++    ]);
++    return GitFileListing(
++      _nulList(included).toSet().toList(),
++      _nulList(ignored).toSet().toList(),
++    );
++  }
++
++  /// The subset of [relativePaths] (native, relative to [root]) that Git
++  /// ignores. Tracked files are never ignored, as in Git. One process.
++  Future<Set<String>> ignoredAmong(Iterable<String> relativePaths) async {
++    final byGitPath = {for (final path in relativePaths) _toGit(path): path};
++    if (byGitPath.isEmpty) return const {};
++    final output = await _runText(
++      ['check-ignore', '--stdin', '-z'],
++      okExitCodes: const {0, 1},
++      stdinText: '${byGitPath.keys.join('\x00')}\x00',
++    );
++    return {
++      for (final entry in output.split('\x00'))
++        if (byGitPath[entry] != null) byGitPath[entry]!,
++    };
++  }
++
++  /// Every ignore source Git reads for this workspace, each with the SHA-256
++  /// of its bytes (null when missing): the effective .gitignore files, the
++  /// repository's info/exclude and core.excludesFile.
++  Future<List<Map<String, Object?>>> ignoreSources(
++    GitFileListing listing,
++  ) async {
++    final gitignores = <String>{};
++    // .gitignore files above the workspace root, up to the top level.
++    var directory = p.dirname(root);
++    while (p.isWithin(topLevel, root) &&
++        (p.isWithin(topLevel, directory) || p.equals(topLevel, directory))) {
++      gitignores.add(p.join(directory, '.gitignore'));
++      if (p.equals(topLevel, directory)) break;
++      directory = p.dirname(directory);
++    }
++    final wholeDirectories = <String>[];
++    for (final entry in [...listing.included, ...listing.ignored]) {
++      if (entry.endsWith(p.separator)) {
++        final directory = entry.substring(0, entry.length - p.separator.length);
++        if (File(p.join(root, directory, '.gitignore')).existsSync()) {
++          wholeDirectories.add(directory);
++        }
++      } else if (p.basename(entry) == '.gitignore') {
++        gitignores.add(p.join(root, entry));
++      }
++    }
++    // Git lists a directory whole either because a pattern ignores it (Git
++    // never reads its .gitignore, as with .pytest_cache/ or a venv) or
++    // because its own .gitignore ignores everything in it (Git does).
++    if (wholeDirectories.isNotEmpty) {
++      final ignoredDirectories = await ignoredAmong(wholeDirectories);
++      for (final directory in wholeDirectories) {
++        if (!ignoredDirectories.contains(directory)) {
++          gitignores.add(p.join(root, directory, '.gitignore'));
++        }
++      }
++    }
++
++    final excludePath = (await _runText([
++      'rev-parse',
++      '--git-path',
++      'info/exclude',
++    ])).trim();
++    final configured = (await _runText(
++      ['config', '--path', '--get', 'core.excludesFile'],
++      okExitCodes: const {0, 1},
++    )).trim();
++    String? excludesFile = configured.isEmpty ? null : configured;
++    if (excludesFile == null) {
++      final xdg = _environment['XDG_CONFIG_HOME'];
++      final home = _environment['HOME'] ?? _environment['USERPROFILE'];
++      if (xdg != null && xdg.isNotEmpty) {
++        excludesFile = p.join(xdg, 'git', 'ignore');
++      } else if (home != null) {
++        excludesFile = p.join(home, '.config', 'git', 'ignore');
++      }
++    }
++
++    String? digest(String path) {
++      try {
++        final file = File(path);
++        if (!file.existsSync()) return null;
++        return sha256.convert(file.readAsBytesSync()).toString();
++      } on FileSystemException {
++        return 'unreadable';
++      }
++    }
++
++    final sources = <Map<String, Object?>>[];
++    for (final path in gitignores.toList()..sort()) {
++      final hash = digest(path);
++      // A missing .gitignore under a listed directory is not a source.
++      if (hash == null) continue;
++      sources.add({
++        'kind': 'gitignore',
++        'path': p.split(p.relative(path, from: topLevel)).join('/'),
++        'sha256': hash,
++      });
++    }
++    final exclude = p.normalize(
++      p.isAbsolute(excludePath) ? excludePath : p.join(root, excludePath),
++    );
++    sources.add({
++      'kind': 'info/exclude',
++      'path': p.split(p.relative(exclude, from: topLevel)).join('/'),
++      'sha256': digest(exclude),
++    });
++    sources.add({
++      'kind': 'core.excludesFile',
++      'path': excludesFile,
++      'sha256': excludesFile == null ? null : digest(excludesFile),
++    });
++    return sources;
++  }
++}
+diff --git a/lib/src/ignore.dart b/lib/src/ignore.dart
+index 845df9f802ed1d790560c5c9778b18dcbce4093a..ee68910c73864143c2926deb748f0f401ae9492d 100644
+--- a/lib/src/ignore.dart
++++ b/lib/src/ignore.dart
+@@ -1,6 +1,7 @@
+ import 'dart:io';
+ 
+ import 'package:path/path.dart' as p;
++import 'git_ignore.dart';
+ import 'workspace.dart';
+ 
+ /// Directories to ignore when watching for file changes.
+@@ -172,21 +173,75 @@ class IgnoreRule {
+   }
+ }
+ 
++/// What a workspace ignores. Inside a Git work tree, [git] decides first and
++/// [rules] (DMC's default directories and `.dmcignore`) apply on top.
++/// Elsewhere [git] is null and [rules] also hold the root `.gitignore`
++/// subset.
++class IgnorePolicy {
++  final List<IgnoreRule> rules;
++  final GitWorkTree? git;
++
++  const IgnorePolicy(this.rules, {this.git});
++
++  bool get gitMode => git != null;
++
++  /// A one-line description for status and doctor.
++  String get description => git == null
++      ? 'dmc rules (not a Git work tree)'
++      : 'git (work tree ${git!.topLevel}, ${git!.executable})';
++}
++
++/// Load the ignore policy for [targetPath]. Throws [GitIgnoreException] when
++/// the workspace is inside a Git work tree but Git cannot be run.
++Future<IgnorePolicy> loadIgnorePolicy(
++  String targetPath, {
++  bool announce = true,
++  GitLocator? gitLocator,
++  Map<String, String>? environment,
++}) async {
++  final git = await GitWorkTree.detect(
++    targetPath,
++    locator: gitLocator,
++    environment: environment,
++  );
++  if (git == null) {
++    return IgnorePolicy(await loadIgnoreRules(targetPath, announce: announce));
++  }
++  if (announce) {
++    print('[DMC] Git decides what is ignored (work tree ${git.topLevel}).');
++  }
++  return IgnorePolicy(
++    await loadIgnoreRules(
++      targetPath,
++      announce: announce,
++      includeGitIgnore: false,
++    ),
++    git: git,
++  );
++}
++
++/// DMC's own rules: the default directories, the root `.gitignore` subset
++/// (unless [includeGitIgnore] is false, as in Git mode) and `.dmcignore`.
+ Future<List<IgnoreRule>> loadIgnoreRules(
+   String targetPath, {
+   bool announce = true,
++  bool includeGitIgnore = true,
+ }) async {
+   final rules = [
+     for (final ignoredDir in ignoredDirs)
+       IgnoreRule.defaultDirectory(ignoredDir),
+   ];
+ 
+-  final gitRuleCount = await _loadRulesFromFile(
+-    File(p.join(targetPath, gitIgnoreFileName)),
+-    rules,
+-  );
+-  if (announce && gitRuleCount > 0) {
+-    print('[DMC] Loaded $gitRuleCount ignore rule(s) from $gitIgnoreFileName');
++  if (includeGitIgnore) {
++    final gitRuleCount = await _loadRulesFromFile(
++      File(p.join(targetPath, gitIgnoreFileName)),
++      rules,
++    );
++    if (announce && gitRuleCount > 0) {
++      print(
++        '[DMC] Loaded $gitRuleCount ignore rule(s) from $gitIgnoreFileName',
++      );
++    }
+   }
+ 
+   final userRuleCount = await _loadRulesFromFile(
+@@ -223,3 +278,23 @@ Future<int> _loadRulesFromFile(File file, List<IgnoreRule> rules) async {
+ 
+   return ruleCount;
+ }
++
++/// The ignore policy line shown by `status` and `doctor`. [ok] is false when
++/// checkpoints would refuse to start because the policy cannot be loaded.
++Future<({String text, bool ok})> describeIgnorePolicy(
++  String targetPath, {
++  GitLocator? gitLocator,
++}) async {
++  try {
++    final policy = await loadIgnorePolicy(
++      targetPath,
++      announce: false,
++      gitLocator: gitLocator,
++    );
++    return (text: policy.description, ok: true);
++  } on GitIgnoreException catch (error) {
++    return (text: 'unavailable (${error.code}): ${error.message}', ok: false);
++  } catch (error) {
++    return (text: 'invalid: $error', ok: false);
++  }
++}
+diff --git a/lib/src/snap.dart b/lib/src/snap.dart
+index 218da813260ff33fe09aadedcf4a5a1021ca86a9..520653d1cedf6aa158e918b3020a8898ab5f3a0b 100644
+--- a/lib/src/snap.dart
++++ b/lib/src/snap.dart
+@@ -24,19 +24,20 @@ Future<int> takeManualSnapshot({String? basePath, String? homePath}) async {
+   final db = DmcDatabase(paths.dbPath);
+   try {
+     db.initialize();
+-    final ignoreRules = await loadIgnoreRules(paths.rootPath);
++    final policy = await loadIgnorePolicy(paths.rootPath);
+     final watcher = DmcWatcher(
+       targetPath: paths.rootPath,
+       database: db,
+       snapshotsPath: paths.snapshotsPath,
+-      ignoreRules: ignoreRules,
++      ignoreRules: policy.rules,
++      git: policy.git,
+       maxFileSizeBytes: config.maxFileSizeBytes,
+       activeTaskNameProvider: () =>
+           readActiveTaskSync(basePath: paths.rootPath),
+     );
+ 
+     var processedFiles = 0;
+-    final scan = await scanWorkspace(paths, ignoreRules);
++    final scan = await scanWorkspacePolicy(paths, policy);
+     var failedFiles = scan.errors.length;
+     for (final error in scan.errors.entries) {
+       print('[DMC] Scan failed ${error.key}: ${error.value}');
+diff --git a/lib/src/status.dart b/lib/src/status.dart
+index 3a6b5cec2f0487b4fa1ff545051591a4a242acaf..5edaf3121783e301176e908fac914a84f7d2ecb2 100644
+--- a/lib/src/status.dart
++++ b/lib/src/status.dart
+@@ -6,6 +6,7 @@ import 'checkpoint_operation_repository.dart';
+ import 'checkpoint_operation_models.dart';
+ import 'daemon.dart';
+ import 'database.dart';
++import 'ignore.dart';
+ import 'workspace.dart';
+ import 'watcher_control.dart';
+ 
+@@ -77,6 +78,11 @@ Future<int> showStatus({
+       ? readControlJson(paths, 'watcher-health.json')
+       : null;
+   print('Protection: ${live?['ready'] == true ? 'ready' : 'not ready'}');
++  if (dmcDirExists) {
++    print(
++      'Ignore policy: ${(await describeIgnorePolicy(paths.rootPath)).text}',
++    );
++  }
+   if (live != null || health != null) {
+     final state = live ?? health!;
+     print('Last watcher state: ${state['phase']}');
+diff --git a/lib/src/watcher.dart b/lib/src/watcher.dart
+index 824301161eed01fcc2c0eeb19f09767287a1d4da..834ef6fae354acaabfd60332c599170ec562bdaf 100644
+--- a/lib/src/watcher.dart
++++ b/lib/src/watcher.dart
+@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
+ import 'config.dart';
+ import 'database.dart';
+ import 'file_policy.dart';
++import 'git_ignore.dart';
+ import 'ignore.dart';
+ import 'snapshot_store.dart';
+ import 'task.dart';
+@@ -42,6 +43,10 @@ class DmcWatcher {
+   final DmcDatabase database;
+   final String snapshotsPath;
+   final List<IgnoreRule> ignoreRules;
++
++  /// In Git mode, Git decides what is ignored before [ignoreRules] apply.
++  /// Events are checked in one `git check-ignore` batch per drain.
++  final GitWorkTree? git;
+   final BurstAssigner burstAssigner;
+   final int Function() _nowMilliseconds;
+   final int maxFileSizeBytes;
+@@ -70,6 +75,7 @@ class DmcWatcher {
+     required this.database,
+     required this.snapshotsPath,
+     required this.ignoreRules,
++    this.git,
+     required this.maxFileSizeBytes,
+     String? Function()? activeTaskNameProvider,
+     BurstAssigner? burstAssigner,
+@@ -158,6 +164,7 @@ class DmcWatcher {
+       final scan = await scanWorkspace(
+         _paths,
+         ignoreRules,
++        git: git,
+         onDirectory: _subscribe,
+       );
+       _scanErrors = scan.errors;
+@@ -177,14 +184,22 @@ class DmcWatcher {
+           .getAllSnapshotRecords()
+           .map((row) => row.filePath)
+           .toSet();
+-      for (final relative in historicalPaths) {
+-        final path = p.join(targetPath, relative);
+-        if (!shouldTrackFile(path)) continue;
+-        if (FileSystemEntity.typeSync(path, followLinks: false) ==
+-                FileSystemEntityType.notFound &&
+-            scan.errors.isEmpty) {
+-          await captureFileNow(path);
+-        }
++      final missing = [
++        for (final relative in historicalPaths)
++          if (shouldTrackFile(p.join(targetPath, relative)) &&
++              FileSystemEntity.typeSync(
++                    p.join(targetPath, relative),
++                    followLinks: false,
++                  ) ==
++                  FileSystemEntityType.notFound)
++            relative,
++      ];
++      final gitIgnored = git == null || missing.isEmpty
++          ? const <String>{}
++          : await git!.ignoredAmong(missing);
++      for (final relative in missing) {
++        if (gitIgnored.contains(relative)) continue;
++        await captureFileNow(p.join(targetPath, relative));
+       }
+       for (final directory in _subscriptions.keys.toList()) {
+         if (!scan.directories.contains(directory)) {
+@@ -257,13 +272,32 @@ class DmcWatcher {
+   Future<void> _drainPending() async {
+     final paths = _queuedPaths.toList();
+     _queuedPaths.clear();
++    final files = <String>[];
+     for (final path in paths) {
+       _pendingBackups.remove(path)?.cancel();
+       if (FileSystemEntity.typeSync(path, followLinks: false) !=
+           FileSystemEntityType.directory) {
+-        await captureFileNow(path);
++        files.add(path);
++      }
++    }
++    var gitIgnored = const <String>{};
++    if (git != null && files.isNotEmpty) {
++      try {
++        gitIgnored = await git!.ignoredAmong([
++          for (final path in files) p.relative(path, from: targetPath),
++        ]);
++        _scanErrors.remove('git');
++      } on GitIgnoreException catch (error) {
++        // Never capture or infer deletions without Git's verdict.
++        _scanErrors['git'] = error.message;
++        _publishHealth();
++        return;
+       }
+     }
++    for (final path in files) {
++      if (gitIgnored.contains(p.relative(path, from: targetPath))) continue;
++      await captureFileNow(path);
++    }
+     _publishHealth();
+   }
+ 
+@@ -408,12 +442,13 @@ Future<int> watchDmc({String? basePath, Future<void>? keepAlive}) async {
+     writeControlJson(paths, 'daemon.pid', {'pid': pid});
+     db.initialize();
+     final config = await loadDmcConfig(basePath: paths.rootPath);
+-    final rules = await loadIgnoreRules(paths.rootPath);
++    final policy = await loadIgnorePolicy(paths.rootPath);
+     watcher = DmcWatcher(
+       targetPath: paths.rootPath,
+       database: db,
+       snapshotsPath: paths.snapshotsPath,
+-      ignoreRules: rules,
++      ignoreRules: policy.rules,
++      git: policy.git,
+       maxFileSizeBytes: config.maxFileSizeBytes,
+       activeTaskNameProvider: () =>
+           readActiveTaskSync(basePath: paths.rootPath),
+diff --git a/lib/src/workspace_scan.dart b/lib/src/workspace_scan.dart
+index 81426cbc1fc451ae57921c60db8bf69292f09414..b2d5facf81ecdeb02bfe4ee2fea5e06e3eca6af7 100644
+--- a/lib/src/workspace_scan.dart
++++ b/lib/src/workspace_scan.dart
+@@ -1,5 +1,6 @@
+ import 'dart:io';
+ import 'package:path/path.dart' as p;
++import 'git_ignore.dart';
+ import 'ignore.dart';
+ import 'workspace.dart';
+ 
+@@ -8,15 +9,44 @@ class WorkspaceScan {
+   final List<String> directories = [];
+   final Map<String, String> exclusions = {};
+   final Map<String, String> errors = {};
++
++  /// Git's view of the workspace, in Git mode only.
++  GitFileListing? gitListing;
+ }
+ 
++/// Exclusion reason for submodules and nested repositories in Git mode.
++const String nestedRepositoryExclusion = 'nested repository';
++
++/// The scan error prefix used when Git cannot list the workspace.
++const String gitScanErrorPrefix = 'Git could not list the workspace';
++
++/// Scan the files [policy] keeps in scope. Every DMC path that needs the
++/// protected file list (checkpoint begin, close and verification, manual
++/// snapshots and the watcher) goes through here.
++Future<WorkspaceScan> scanWorkspacePolicy(
++  DmcPaths paths,
++  IgnorePolicy policy, {
++  void Function(String directory)? onDirectory,
++}) => scanWorkspace(
++  paths,
++  policy.rules,
++  git: policy.git,
++  onDirectory: onDirectory,
++);
++
+ /// Walk one directory at a time, pruning before descent and never following
+ /// links. Nested .gitignore files are deliberately rejected, not misinterpreted.
++///
++/// With [git] (Git mode), Git's file list replaces the walk: tracked files
++/// plus untracked files Git does not ignore. [rules], link checks and the
++/// nested-repository exclusion then apply on top.
+ Future<WorkspaceScan> scanWorkspace(
+   DmcPaths paths,
+   List<IgnoreRule> rules, {
++  GitWorkTree? git,
+   void Function(String directory)? onDirectory,
+ }) async {
++  if (git != null) return _scanWithGit(paths, rules, git, onDirectory);
+   final result = WorkspaceScan();
+   Future<void> visit(String directory) async {
+     try {
+@@ -58,3 +88,129 @@ Future<WorkspaceScan> scanWorkspace(
+   await visit(paths.rootPath);
+   return result;
+ }
++
++Future<WorkspaceScan> _scanWithGit(
++  DmcPaths paths,
++  List<IgnoreRule> rules,
++  GitWorkTree git,
++  void Function(String directory)? onDirectory,
++) async {
++  final result = WorkspaceScan();
++  final GitFileListing listing;
++  try {
++    listing = await git.list();
++  } on GitIgnoreException catch (error) {
++    result.errors['.'] = '$gitScanErrorPrefix: ${error.message}';
++    return result;
++  }
++  result.gitListing = listing;
++
++  // Report what Git ignores, collapsed to the topmost listed entry.
++  final ignored = [
++    for (final entry in listing.ignored)
++      entry.endsWith(p.separator)
++          ? entry.substring(0, entry.length - p.separator.length)
++          : entry,
++  ]..sort();
++  final reported = <String>[];
++  for (final entry in ignored) {
++    if (reported.any((parent) => p.isWithin(parent, entry))) continue;
++    reported.add(entry);
++    result.exclusions[entry] = 'ignored';
++  }
++
++  final directories = <String>{paths.rootPath};
++  // Directory (relative) → null when it is a real directory inside the
++  // workspace, or the relative path of the link/non-directory that blocks it.
++  final blocked = <String, String?>{};
++  String? blockerFor(String relativeDirectory) {
++    if (relativeDirectory == '.' || relativeDirectory.isEmpty) return null;
++    if (blocked.containsKey(relativeDirectory)) {
++      return blocked[relativeDirectory];
++    }
++    final parentBlocker = blockerFor(p.dirname(relativeDirectory));
++    final String? blocker;
++    if (parentBlocker != null) {
++      blocker = parentBlocker;
++    } else {
++      final type = FileSystemEntity.typeSync(
++        p.join(paths.rootPath, relativeDirectory),
++        followLinks: false,
++      );
++      blocker = type == FileSystemEntityType.directory
++          ? null
++          : relativeDirectory;
++    }
++    return blocked[relativeDirectory] = blocker;
++  }
++
++  bool dmcIgnored(String relative, {required bool isDirectory}) {
++    final segments = p.split(relative);
++    for (var length = 1; length <= segments.length; length++) {
++      final prefix = p.joinAll(segments.take(length));
++      final prefixIsDirectory = length < segments.length || isDirectory;
++      if (rules.any(
++        (rule) => rule.matches(prefix, isDirectory: prefixIsDirectory),
++      )) {
++        result.exclusions[prefix] = 'ignored';
++        return true;
++      }
++    }
++    return false;
++  }
++
++  for (final entry in listing.included.toList()..sort()) {
++    if (entry.endsWith(p.separator)) {
++      final relative = entry.substring(0, entry.length - p.separator.length);
++      if (!dmcIgnored(relative, isDirectory: true)) {
++        result.exclusions[relative] = nestedRepositoryExclusion;
++      }
++      continue;
++    }
++    final relative = p.normalize(entry);
++    if (relative == '.' || relative.startsWith('..')) continue;
++    if (dmcIgnored(relative, isDirectory: false)) continue;
++    final blocker = blockerFor(p.dirname(relative));
++    if (blocker != null) {
++      final absolute = p.join(paths.rootPath, blocker);
++      final type = FileSystemEntity.typeSync(absolute, followLinks: false);
++      if (type == FileSystemEntityType.link) {
++        result.exclusions[blocker] = 'symlink';
++      }
++      // A missing parent means the tracked file was deleted: not in scope.
++      continue;
++    }
++    final absolute = p.join(paths.rootPath, relative);
++    switch (FileSystemEntity.typeSync(absolute, followLinks: false)) {
++      case FileSystemEntityType.file:
++        result.files.add(absolute);
++        var directory = p.dirname(absolute);
++        while (directories.add(directory)) {
++          directory = p.dirname(directory);
++        }
++      case FileSystemEntityType.link:
++        result.exclusions[relative] = 'symlink';
++      case FileSystemEntityType.directory:
++        // A gitlink: a submodule or an embedded repository.
++        result.exclusions[relative] = nestedRepositoryExclusion;
++      case FileSystemEntityType.notFound:
++        // Tracked but deleted from the work tree.
++        break;
++      default:
++        result.exclusions[relative] = 'unsupported file type';
++    }
++  }
++
++  try {
++    paths.validateInternalPath(paths.rootPath);
++  } catch (e) {
++    result.errors['.'] = e.toString();
++  }
++  result.directories.addAll(directories.toList()..sort());
++  if (onDirectory != null) {
++    for (final directory in result.directories) {
++      onDirectory(directory);
++    }
++  }
++  return result;
++}

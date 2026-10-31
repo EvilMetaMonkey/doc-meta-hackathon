@@ -1,0 +1,1164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 26 Oct 2026 20:37:24 +0000
+Subject: [PATCH 05/31] Add dmc agent-hook for Muse Code and Claude Code turns
+
+`dmc agent-hook <muse-code|claude-code> <event>` finds the workspace from
+the payload cwd, begins a labelled checkpoint with agent context on
+UserPromptSubmit, and closes it on Stop/StopFailure/SessionEnd (and Muse
+Interrupt) only when this agent and session own it. Ownership is checked
+under the same workspace lock as the close via CheckpointService.closeActive,
+which also records the transcript size and SHA-256. A missed Stop is closed
+by the next prompt; foreign checkpoints are left alone with a stderr warning.
+Busy locks are retried briefly. The command always exits 0, never writes
+stdout, and falls back to the session env when stdin is empty or invalid.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TZntz1MeHVb13u53UKzx8U
+---
+ lib/dmc.dart                    |   1 +
+ lib/src/agent_hooks.dart        | 355 +++++++++++++++++++++++++
+ lib/src/checkpoint_service.dart | 125 +++++++--
+ lib/src/cli.dart                |   9 +
+ test/agent_hooks_test.dart      | 454 ++++++++++++++++++++++++++++++++
+ 5 files changed, 919 insertions(+), 25 deletions(-)
+ create mode 100644 lib/src/agent_hooks.dart
+ create mode 100644 test/agent_hooks_test.dart
+
+diff --git a/lib/dmc.dart b/lib/dmc.dart
+index 05ce3c79b62ee51bbee85e6f8b3e3e986e1c6f03..9df9163657d8ed30e18f458d038bbc83aea28183 100644
+--- a/lib/dmc.dart
++++ b/lib/dmc.dart
+@@ -1,4 +1,5 @@
+ // Re-export public API
++export 'src/agent_hooks.dart';
+ export 'src/config.dart';
+ export 'src/checkpoint_models.dart';
+ export 'src/checkpoint_operation_models.dart';
+diff --git a/lib/src/agent_hooks.dart b/lib/src/agent_hooks.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc1e4357c3103c45f6fe87bafd70a1a0ebf339ec
+--- /dev/null
++++ b/lib/src/agent_hooks.dart
+@@ -0,0 +1,355 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:path/path.dart' as p;
++
++import 'checkpoint_models.dart';
++import 'checkpoint_service.dart';
++import 'machine_output.dart';
++import 'workspace.dart';
++
++/// A coding agent whose turn hooks call `dmc agent-hook`.
++enum HookAgent {
++  museCode('muse-code', 'Muse Code', ['MUSE_SESSION_ID', 'MUSE_THREAD_ID']),
++  claudeCode('claude-code', 'Claude Code', ['CLAUDE_CODE_SESSION_ID']);
++
++  /// The CLI name, also used as the checkpoint source.
++  final String id;
++  final String displayName;
++
++  /// Environment variables that carry the session ID, in preference order.
++  final List<String> sessionEnvironment;
++
++  const HookAgent(this.id, this.displayName, this.sessionEnvironment);
++
++  static HookAgent? fromId(String value) {
++    for (final agent in values) {
++      if (agent.id == value) return agent;
++    }
++    return null;
++  }
++
++  /// Hook events that end a turn for this agent. Claude Code has no
++  /// Interrupt event; a cancelled turn is closed by the next prompt instead.
++  Set<String> get closeEvents => switch (this) {
++    museCode => const {'Stop', 'StopFailure', 'Interrupt', 'SessionEnd'},
++    claudeCode => const {'Stop', 'StopFailure', 'SessionEnd'},
++  };
++}
++
++enum AgentHookAction { begin, close, none }
++
++AgentHookAction agentHookAction(HookAgent agent, String event) {
++  if (event == 'UserPromptSubmit') return AgentHookAction.begin;
++  if (agent.closeEvents.contains(event)) return AgentHookAction.close;
++  return AgentHookAction.none;
++}
++
++const int _maxLabelLength = 100;
++
++/// The checkpoint label for a prompt: its first line, trimmed, at most
++/// [_maxLabelLength] characters.
++String agentTurnLabel(HookAgent agent, String? prompt) {
++  final firstLine = (prompt ?? '').split(RegExp(r'\r?\n')).first.trim();
++  if (firstLine.isEmpty) return '${agent.displayName} turn';
++  final runes = firstLine.runes.toList();
++  if (runes.length <= _maxLabelLength) return firstLine;
++  return '${String.fromCharCodes(runes.take(_maxLabelLength - 1)).trimRight()}…';
++}
++
++/// The fields dmc reads from an agent hook's stdin payload.
++class AgentHookPayload {
++  final String? sessionId;
++  final String? turnId;
++  final String? cwd;
++  final String? transcriptPath;
++  final String? prompt;
++
++  const AgentHookPayload({
++    this.sessionId,
++    this.turnId,
++    this.cwd,
++    this.transcriptPath,
++    this.prompt,
++  });
++
++  /// Parse [stdinText], falling back to [environment] for the session ID
++  /// when stdin is empty, invalid, or lacks one.
++  factory AgentHookPayload.parse(
++    HookAgent agent,
++    String? stdinText,
++    Map<String, String> environment,
++  ) {
++    Map<String, Object?> json = const {};
++    if (stdinText != null && stdinText.trim().isNotEmpty) {
++      try {
++        final decoded = jsonDecode(stdinText);
++        if (decoded is Map<String, Object?>) json = decoded;
++      } on FormatException {
++        // Fall back to the environment below.
++      }
++    }
++    String? text(String key) {
++      final value = json[key];
++      return value is String && value.trim().isNotEmpty ? value : null;
++    }
++
++    String? environmentSession() {
++      for (final name in agent.sessionEnvironment) {
++        final value = environment[name];
++        if (value != null && value.trim().isNotEmpty) return value.trim();
++      }
++      return null;
++    }
++
++    return AgentHookPayload(
++      sessionId: text('session_id') ?? environmentSession(),
++      // Muse Code sends turn_id; Claude Code identifies the turn by prompt_id.
++      turnId: text('turn_id') ?? text('prompt_id'),
++      cwd: text('cwd'),
++      transcriptPath: text('transcript_path'),
++      prompt: json['prompt'] is String ? json['prompt'] as String : null,
++    );
++  }
++}
++
++/// Walk up from [start] to the nearest directory that contains `.dmc/`.
++String? findDmcWorkspace(String start) {
++  var current = p.normalize(p.absolute(start));
++  while (true) {
++    final type = FileSystemEntity.typeSync(
++      p.join(current, dmcDirName),
++      followLinks: false,
++    );
++    if (type == FileSystemEntityType.directory) return current;
++    final parent = p.dirname(current);
++    if (parent == current) return null;
++    current = parent;
++  }
++}
++
++final _safeSessionId = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]*$');
++
++/// Locate Muse Code's `session.jsonl` for [sessionId] under
++/// `<data>/muse/sessions/YYYY/MM/DD/<session-id>/`, newest day first.
++String? findMuseTranscript(String sessionId, Map<String, String> environment) {
++  if (!_safeSessionId.hasMatch(sessionId)) return null;
++  final home = environment['HOME'] ?? environment['USERPROFILE'];
++  final dataHome =
++      environment['XDG_DATA_HOME'] ??
++      (home == null ? null : p.join(home, '.local', 'share'));
++  if (dataHome == null) return null;
++  final sessions = Directory(p.join(dataHome, 'muse', 'sessions'));
++  List<Directory> children(Directory directory) {
++    try {
++      return directory
++          .listSync(followLinks: false)
++          .whereType<Directory>()
++          .toList()
++        ..sort((a, b) => b.path.compareTo(a.path));
++    } on FileSystemException {
++      return const [];
++    }
++  }
++
++  for (final year in children(sessions)) {
++    for (final month in children(year)) {
++      for (final day in children(month)) {
++        final candidate = p.join(day.path, sessionId, 'session.jsonl');
++        if (FileSystemEntity.typeSync(candidate) == FileSystemEntityType.file) {
++          return candidate;
++        }
++      }
++    }
++  }
++  return null;
++}
++
++/// Turns agent hook events into checkpoint begin/close calls.
++///
++/// A hook must never block or alter an agent turn, so [run] never throws and
++/// reports problems only through [warn].
++class AgentHookRunner {
++  final Map<String, String> environment;
++  final String Function() currentDirectory;
++  final CheckpointService Function(String rootPath) serviceFactory;
++  final void Function(String message) warn;
++
++  /// How long to keep retrying a busy workspace lock.
++  final Duration lockBudget;
++  final Duration lockRetryDelay;
++
++  AgentHookRunner({
++    Map<String, String>? environment,
++    String Function()? currentDirectory,
++    CheckpointService Function(String rootPath)? serviceFactory,
++    void Function(String message)? warn,
++    this.lockBudget = const Duration(seconds: 5),
++    this.lockRetryDelay = const Duration(milliseconds: 100),
++  }) : environment = environment ?? Platform.environment,
++       currentDirectory = currentDirectory ?? (() => Directory.current.path),
++       serviceFactory =
++           serviceFactory ??
++           ((rootPath) => CheckpointService(basePath: rootPath)),
++       warn = warn ?? ((message) => stderr.writeln(message));
++
++  Future<void> run(List<String> args, {String? stdinText}) async {
++    try {
++      await _run(args, stdinText);
++    } catch (error) {
++      _warn('unexpected error: $error');
++    }
++  }
++
++  void _warn(String message) => warn('[DMC] agent-hook: $message');
++
++  Future<void> _run(List<String> args, String? stdinText) async {
++    if (args.length < 2) {
++      _warn('usage: dmc agent-hook <muse-code|claude-code> <event>');
++      return;
++    }
++    final agent = HookAgent.fromId(args[0]);
++    if (agent == null) {
++      _warn('unknown agent "${args[0]}"; expected muse-code or claude-code.');
++      return;
++    }
++    final event = args[1];
++    final action = agentHookAction(agent, event);
++    if (action == AgentHookAction.none) return;
++
++    final payload = AgentHookPayload.parse(agent, stdinText, environment);
++    final start = payload.cwd != null && p.isAbsolute(payload.cwd!)
++        ? payload.cwd!
++        : currentDirectory();
++    final root = findDmcWorkspace(start);
++    if (root == null) return;
++
++    final service = serviceFactory(root);
++    var transcriptPath = payload.transcriptPath;
++    if (transcriptPath == null &&
++        agent == HookAgent.museCode &&
++        payload.sessionId != null) {
++      transcriptPath = findMuseTranscript(payload.sessionId!, environment);
++    }
++    bool owns(CheckpointRecord checkpoint) =>
++        checkpoint.agent?.agent == agent.id &&
++        checkpoint.agent?.sessionId == payload.sessionId;
++
++    final closed = await _withLockRetry(
++      () => service.closeActive(owns: owns, transcriptPath: transcriptPath),
++    );
++    final closeCode = _errorCode(closed);
++    if (action == AgentHookAction.close) {
++      if (closed.exitCode != 0 &&
++          closeCode != 'no_active_checkpoint' &&
++          closeCode != 'checkpoint_not_owned') {
++        _warn('$event: could not close the checkpoint: ${_errorText(closed)}');
++      }
++      return;
++    }
++
++    // UserPromptSubmit. An open checkpoint from this session means its Stop
++    // never arrived (for example, a cancelled turn): it was closed above.
++    switch (closeCode) {
++      case 'checkpoint_not_owned':
++        _warn(
++          '${_errorText(closed)} No checkpoint was started for this ${agent.displayName} turn.',
++        );
++        return;
++      case 'checkpoint_busy':
++      case 'checkpoint_not_open':
++      case 'close_failed':
++      case 'not_initialized':
++        _warn('no checkpoint was started for this turn: ${_errorText(closed)}');
++        return;
++    }
++    if (closed.ok) {
++      _warn(
++        'closed checkpoint ${_checkpointId(closed)}, left open by an earlier ${agent.displayName} turn in this session.',
++      );
++    } else if (closeCode != 'no_active_checkpoint') {
++      _warn(
++        'the earlier turn\'s checkpoint ${_checkpointId(closed) ?? ''} closed with errors: ${_errorText(closed)}',
++      );
++    }
++
++    final began = await _withLockRetry(
++      () => service.begin(
++        label: agentTurnLabel(agent, payload.prompt),
++        source: agent.id,
++        agent: CheckpointAgentContext(
++          agent: agent.id,
++          sessionId: payload.sessionId,
++          turnId: payload.turnId,
++          transcriptPath: transcriptPath,
++        ),
++      ),
++    );
++    if (!began.ok) {
++      _warn('could not begin a checkpoint: ${_errorText(began)}');
++    }
++  }
++
++  Future<CommandResult> _withLockRetry(
++    Future<CommandResult> Function() operation,
++  ) async {
++    final stopwatch = Stopwatch()..start();
++    while (true) {
++      final result = await operation();
++      if (_errorCode(result) != 'checkpoint_busy' ||
++          stopwatch.elapsed + lockRetryDelay > lockBudget) {
++        return result;
++      }
++      await Future<void>.delayed(lockRetryDelay);
++    }
++  }
++
++  static String? _errorCode(CommandResult result) =>
++      result.errors.isEmpty ? null : result.errors.first.code;
++
++  static String _errorText(CommandResult result) => result.errors.isEmpty
++      ? 'exit ${result.exitCode}'
++      : result.errors.map((error) => error.message).join(' ');
++
++  static String? _checkpointId(CommandResult result) {
++    final checkpoint = result.data['checkpoint'];
++    return checkpoint is Map ? checkpoint['id'] as String? : null;
++  }
++}
++
++/// Read a hook payload from stdin without waiting on a terminal or on a
++/// pipe that never closes.
++Future<String?> readHookStdin({
++  Duration timeout = const Duration(seconds: 2),
++}) async {
++  try {
++    if (stdin.hasTerminal) return null;
++    // A stream timeout errors the fold, which cancels the stdin subscription;
++    // a Future timeout would leave it listening and keep the process alive.
++    final bytes = await stdin
++        .timeout(timeout)
++        .fold<List<int>>(<int>[], (all, chunk) => all..addAll(chunk));
++    return utf8.decode(bytes, allowMalformed: true);
++  } catch (_) {
++    return null;
++  }
++}
++
++/// `dmc agent-hook <agent> <event>`. Always returns 0 and never writes to
++/// stdout, so it can never block or alter an agent turn.
++Future<int> runAgentHookCommand(
++  List<String> args, {
++  Future<String?> Function()? readStdin,
++  AgentHookRunner? runner,
++}) async {
++  try {
++    await runZoned(() async {
++      final stdinText = await (readStdin ?? readHookStdin)();
++      await (runner ?? AgentHookRunner()).run(args, stdinText: stdinText);
++    }, zoneSpecification: ZoneSpecification(print: (_, _, _, _) {}));
++  } catch (_) {
++    // A hook failure must not reach the agent.
++  }
++  return 0;
++}
+diff --git a/lib/src/checkpoint_service.dart b/lib/src/checkpoint_service.dart
+index 817fdc598fd4b862d0e41160b20ba019fb94ce8f..88e61ff9ab01c8acdb92404143ae9ca14551caad 100644
+--- a/lib/src/checkpoint_service.dart
++++ b/lib/src/checkpoint_service.dart
+@@ -60,7 +60,11 @@ class CheckpointService {
+     return 'cp_${timestamp.toRadixString(36)}_$suffix';
+   }
+ 
+-  Future<CommandResult> begin({String? label, String source = 'manual'}) async {
++  Future<CommandResult> begin({
++    String? label,
++    String source = 'manual',
++    CheckpointAgentContext? agent,
++  }) async {
+     const command = 'checkpoint.begin';
+     final normalizedSource = source.trim();
+     final normalizedLabel = label?.trim();
+@@ -126,6 +130,7 @@ class CheckpointService {
+           source: normalizedSource,
+           createdAt: createdAt,
+           policyFingerprint: 'unavailable',
++          agent: agent,
+         );
+         checkpointCreated = true;
+         repository.addIssue(
+@@ -157,6 +162,7 @@ class CheckpointService {
+         source: normalizedSource,
+         createdAt: createdAt,
+         policyFingerprint: policy.fingerprint,
++        agent: agent,
+       );
+       checkpointCreated = true;
+ 
+@@ -263,7 +269,23 @@ class CheckpointService {
+     }
+   }
+ 
+-  Future<CommandResult> close(String id) async {
++  Future<CommandResult> close(String id) => _close(id: id);
++
++  /// Close the active checkpoint only if [owns] accepts it. Ownership is
++  /// checked under the same workspace lock as the close, so another DMC
++  /// process cannot swap the active checkpoint in between. For an agent
++  /// checkpoint, the transcript at [transcriptPath] (or the path recorded at
++  /// begin) is measured and recorded.
++  Future<CommandResult> closeActive({
++    required bool Function(CheckpointRecord checkpoint) owns,
++    String? transcriptPath,
++  }) => _close(owns: owns, transcriptPath: transcriptPath);
++
++  Future<CommandResult> _close({
++    String? id,
++    bool Function(CheckpointRecord checkpoint)? owns,
++    String? transcriptPath,
++  }) async {
+     const command = 'checkpoint.close';
+     final paths = DmcPaths(basePath: basePath);
+     final database = DmcDatabase(paths.dbPath);
+@@ -280,19 +302,37 @@ class CheckpointService {
+       commandLock = WorkspaceOperationLock.acquire(paths);
+       database.initialize();
+       final repository = CheckpointRepository(database);
+-      var checkpoint = repository.getCheckpoint(id);
++      var checkpoint = id == null
++          ? repository.getActiveCheckpoint()
++          : repository.getCheckpoint(id);
+       if (checkpoint == null) {
++        return id == null
++            ? machineFailure(
++                command,
++                5,
++                'no_active_checkpoint',
++                'No checkpoint is active.',
++              )
++            : machineFailure(
++                command,
++                5,
++                'checkpoint_not_found',
++                'Checkpoint $id was not found.',
++              );
++      }
++      final checkpointId = checkpoint.id;
++      if (owns != null && !owns(checkpoint)) {
+         return machineFailure(
+           command,
+-          5,
+-          'checkpoint_not_found',
+-          'Checkpoint $id was not found.',
++          3,
++          'checkpoint_not_owned',
++          'Checkpoint $checkpointId (source ${checkpoint.source}) is active and belongs to another owner.',
+         );
+       }
+       if (checkpoint.status == CheckpointStatus.closed) {
+         return _viewResult(
+           command,
+-          repository.getView(id)!,
++          repository.getView(checkpointId)!,
+           includeFiles: false,
+         );
+       }
+@@ -302,18 +342,18 @@ class CheckpointService {
+           command,
+           3,
+           'checkpoint_not_open',
+-          'Checkpoint $id is ${checkpoint.status.name} and cannot be closed.',
++          'Checkpoint $checkpointId is ${checkpoint.status.name} and cannot be closed.',
+         );
+       }
+ 
+       final policy = await _loadPolicy(paths);
+-      repository.prepareClose(id);
+-      final issues = repository.getIssues(id);
++      repository.prepareClose(checkpointId);
++      final issues = repository.getIssues(checkpointId);
+       if (policy.fingerprint != checkpoint.policyFingerprint) {
+         _addIssue(
+           repository,
+           issues,
+-          checkpointId: id,
++          checkpointId: checkpointId,
+           phase: 'close',
+           code: 'policy_changed',
+           message:
+@@ -323,7 +363,7 @@ class CheckpointService {
+       } else {
+         final store = _storeFactory(database, paths.snapshotsPath);
+         final before = {
+-          for (final file in repository.getFiles(id))
++          for (final file in repository.getFiles(checkpointId))
+             if (file.beforeKind == CheckpointFileKind.file &&
+                 file.beforeSnapshotId != null &&
+                 file.beforeHash != null)
+@@ -335,7 +375,7 @@ class CheckpointService {
+         };
+         final after = <String, _CapturedFile>{};
+         final scan = await scanWorkspace(paths, policy.rules);
+-        _recordScanIssues(repository, id, 'close', scan, issues);
++        _recordScanIssues(repository, checkpointId, 'close', scan, issues);
+         if (scan.errors.isEmpty) {
+           for (final filePath in [...scan.files]..sort()) {
+             final relative = p.normalize(
+@@ -347,7 +387,7 @@ class CheckpointService {
+               filePath,
+               relative,
+               policy.config.maxFileSizeBytes,
+-              id,
++              checkpointId,
+               'close',
+               repository,
+               issues,
+@@ -357,7 +397,7 @@ class CheckpointService {
+                 _addIssue(
+                   repository,
+                   issues,
+-                  checkpointId: id,
++                  checkpointId: checkpointId,
+                   phase: 'close',
+                   filePath: relative,
+                   code: 'protected_file_excluded',
+@@ -372,7 +412,7 @@ class CheckpointService {
+             final prior = before[relative];
+             if (prior == null) {
+               repository.addCreatedFile(
+-                checkpointId: id,
++                checkpointId: checkpointId,
+                 filePath: relative,
+                 snapshotId: captured.snapshotId,
+                 hash: captured.hash,
+@@ -380,7 +420,7 @@ class CheckpointService {
+               );
+             } else {
+               repository.setAfterFile(
+-                checkpointId: id,
++                checkpointId: checkpointId,
+                 filePath: relative,
+                 snapshotId: captured.snapshotId,
+                 hash: captured.hash,
+@@ -398,7 +438,10 @@ class CheckpointService {
+             final absolute = p.join(paths.rootPath, relative);
+             if (FileSystemEntity.typeSync(absolute, followLinks: false) ==
+                 FileSystemEntityType.notFound) {
+-              repository.setAfterAbsent(checkpointId: id, filePath: relative);
++              repository.setAfterAbsent(
++                checkpointId: checkpointId,
++                filePath: relative,
++              );
+             }
+           }
+           await _verifyCurrentManifest(
+@@ -408,35 +451,45 @@ class CheckpointService {
+             store: store,
+             expected: after,
+             expectedAbsent: before.keys.toSet().difference(after.keys.toSet()),
+-            checkpointId: id,
++            checkpointId: checkpointId,
+             phase: 'close',
+             repository: repository,
+             issues: issues,
+           );
+           _verifyStoredManifest(
+             paths,
+-            repository.getFiles(id),
++            repository.getFiles(checkpointId),
+             repository,
+             issues,
+-            id,
++            checkpointId,
+           );
+         }
+       }
+ 
+-      final finalIssues = repository.getIssues(id);
++      final finalIssues = repository.getIssues(checkpointId);
+       final fatalCount = finalIssues.where((issue) => issue.fatal).length;
+       final exclusionCount = finalIssues.where((issue) => !issue.fatal).length;
++      if (checkpoint.agent != null) {
++        final path = transcriptPath ?? checkpoint.agent!.transcriptPath;
++        final measured = path == null ? null : await measureTranscript(path);
++        repository.setAgentTranscript(
++          checkpointId,
++          path: path,
++          bytes: measured?.bytes,
++          sha256: measured?.sha256,
++        );
++      }
+       repository.finishClose(
+-        id,
++        checkpointId,
+         valid: fatalCount == 0,
+         closedAt: _now(),
+         fatalErrors: fatalCount,
+         exclusions: exclusionCount,
+       );
+-      checkpoint = repository.getCheckpoint(id)!;
++      checkpoint = repository.getCheckpoint(checkpointId)!;
+       return _viewResult(
+         command,
+-        repository.getView(id)!,
++        repository.getView(checkpointId)!,
+         exitCode: checkpoint.status == CheckpointStatus.closed ? 0 : 3,
+         includeFiles: false,
+       );
+@@ -1018,6 +1071,28 @@ class CheckpointService {
+   }
+ }
+ 
++/// Size and SHA-256 of the bytes of the agent transcript at [path], read in
++/// one pass. Null when the path is not a readable regular file.
++Future<({int bytes, String sha256})?> measureTranscript(String path) async {
++  try {
++    if (FileSystemEntity.typeSync(path) != FileSystemEntityType.file) {
++      return null;
++    }
++    var bytes = 0;
++    final digest = await sha256
++        .bind(
++          File(path).openRead().map((chunk) {
++            bytes += chunk.length;
++            return chunk;
++          }),
++        )
++        .first;
++    return (bytes: bytes, sha256: digest.toString());
++  } on FileSystemException {
++    return null;
++  }
++}
++
+ /// Human-readable agent context for a checkpoint's JSON `agent` object.
+ List<String> checkpointAgentLines(Map<dynamic, dynamic> agent) {
+   final bytes = agent['transcriptBytes'];
+diff --git a/lib/src/cli.dart b/lib/src/cli.dart
+index 829add7ae7f755a1487d1d3b5346634319010d71..5971f14cfdf3c67f97064df42baa6ac3f3fba11d 100644
+--- a/lib/src/cli.dart
++++ b/lib/src/cli.dart
+@@ -2,6 +2,7 @@ import 'dart:async';
+ import 'dart:io';
+ 
+ import 'package:args/args.dart';
++import 'agent_hooks.dart';
+ import 'checkpoint_service.dart';
+ import 'checkpoint_restore_service.dart';
+ import 'daemon.dart';
+@@ -556,6 +557,11 @@ Future<int> _runDiffCommand(ArgResults command) async {
+ 
+ /// Parse command-line arguments and execute the appropriate command
+ Future<int> runCli(List<String> args) async {
++  // Agent hooks bypass normal parsing: they must exit 0 with empty stdout
++  // even for arguments this version does not understand.
++  if (args.isNotEmpty && args.first == 'agent-hook') {
++    return runAgentHookCommand(args.sublist(1));
++  }
+   try {
+     return await _runCli(args);
+   } on FormatException catch (e) {
+@@ -779,6 +785,9 @@ Future<int> _runCli(List<String> args) async {
+     print(
+       '  checkpoint recover <operation-id> (--resume|--rollback) [--preview] [--json]',
+     );
++    print(
++      '  agent-hook <muse-code|claude-code> <event>  Checkpoint an agent turn (called by agent hooks)',
++    );
+     print(
+       '  gc [--dry-run]       Prune expired snapshots using retention config',
+     );
+diff --git a/test/agent_hooks_test.dart b/test/agent_hooks_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9bf5b880636a3c304777de1cd6005cb72182310
+--- /dev/null
++++ b/test/agent_hooks_test.dart
+@@ -0,0 +1,454 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:crypto/crypto.dart';
++import 'package:dmc/dmc.dart';
++import 'package:dmc/src/workspace_operation_lock.dart';
++import 'package:path/path.dart' as p;
++import 'package:test/test.dart';
++
++const museSession = '22222222-3333-4444-8555-666666666666';
++const claudeSession = '11111111-2222-4333-8444-555555555555';
++
++/// A fixture payload with `cwd` (and optionally other fields) replaced.
++String fixture(
++  String agentDirectory,
++  String name, {
++  required String cwd,
++  Map<String, Object?> overrides = const {},
++}) {
++  final file = File(
++    p.join('test', 'fixtures', 'agent_hooks', agentDirectory, '$name.json'),
++  );
++  final payload = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
++  return jsonEncode({...payload, 'cwd': cwd, ...overrides});
++}
++
++void main() {
++  late Directory sandbox;
++  late Directory root;
++  late Directory home;
++  late DmcPaths paths;
++  late List<String> warnings;
++  late Map<String, String> environment;
++  late String processCwd;
++  var servicesCreated = 0;
++
++  AgentHookRunner runner({
++    Duration lockBudget = const Duration(seconds: 2),
++    Duration lockRetryDelay = const Duration(milliseconds: 20),
++  }) => AgentHookRunner(
++    environment: environment,
++    currentDirectory: () => processCwd,
++    serviceFactory: (rootPath) {
++      servicesCreated++;
++      return CheckpointService(basePath: rootPath, homePath: home.path);
++    },
++    warn: warnings.add,
++    lockBudget: lockBudget,
++    lockRetryDelay: lockRetryDelay,
++  );
++
++  Future<void> hook(
++    String agent,
++    String event, {
++    String? stdinText,
++    AgentHookRunner? using,
++  }) => (using ?? runner()).run([agent, event], stdinText: stdinText);
++
++  List<CheckpointRecord> checkpoints() {
++    final database = DmcDatabase(paths.dbPath)..initialize();
++    try {
++      return CheckpointRepository(database).listCheckpoints().reversed.toList();
++    } finally {
++      database.close();
++    }
++  }
++
++  setUp(() async {
++    sandbox = Directory.systemTemp.createTempSync('dmc_agent_hooks_');
++    root = Directory(p.join(sandbox.path, 'project'))..createSync();
++    home = Directory(p.join(sandbox.path, 'home'))..createSync();
++    paths = DmcPaths(basePath: root.path);
++    await initDmc(basePath: root.path);
++    File(p.join(root.path, 'auth.dart')).writeAsStringSync('v1');
++    warnings = [];
++    environment = {'HOME': home.path};
++    processCwd = root.path;
++    servicesCreated = 0;
++  });
++
++  tearDown(() {
++    if (sandbox.existsSync()) sandbox.deleteSync(recursive: true);
++  });
++
++  test('Muse Code turn begins on prompt and closes on Stop', () async {
++    final transcript = File(
++      p.join(
++        home.path,
++        '.local',
++        'share',
++        'muse',
++        'sessions',
++        '2026',
++        '10',
++        '26',
++        museSession,
++        'session.jsonl',
++      ),
++    )..createSync(recursive: true);
++    transcript.writeAsStringSync('{"sequence":1}\n');
++
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++    );
++    var records = checkpoints();
++    expect(records, hasLength(1));
++    expect(records.single.status, CheckpointStatus.open);
++    expect(records.single.source, 'muse-code');
++    expect(records.single.label, 'Refactor the auth module');
++    expect(records.single.agent!.sessionId, museSession);
++    expect(records.single.agent!.turnId, 'turn-0001');
++    expect(records.single.agent!.transcriptPath, transcript.path);
++    expect(records.single.agent!.transcriptBytes, isNull);
++
++    File(p.join(root.path, 'auth.dart')).writeAsStringSync('v2');
++    transcript.writeAsStringSync('{"sequence":2}\n', mode: FileMode.append);
++    await hook(
++      'muse-code',
++      'Stop',
++      stdinText: fixture('muse_code', 'stop', cwd: root.path),
++    );
++    records = checkpoints();
++    expect(records.single.status, CheckpointStatus.closed);
++    final bytes = transcript.readAsBytesSync();
++    expect(records.single.agent!.transcriptBytes, bytes.length);
++    expect(
++      records.single.agent!.transcriptSha256,
++      sha256.convert(bytes).toString(),
++    );
++    final view = await CheckpointService(
++      basePath: root.path,
++      homePath: home.path,
++    ).show(records.single.id);
++    expect(view.data['files'], [containsPair('change', 'modified')]);
++    final agentJson =
++        (view.data['checkpoint'] as Map<String, Object?>)['agent'] as Map;
++    expect(agentJson['name'], 'muse-code');
++    expect(agentJson['transcriptBytes'], bytes.length);
++    expect(
++      checkpointHumanLines(view),
++      contains(startsWith('Agent: muse-code')),
++    );
++    expect(warnings, isEmpty);
++
++    // SessionEnd after Stop finds nothing to close.
++    await hook(
++      'muse-code',
++      'SessionEnd',
++      stdinText: fixture('muse_code', 'session_end', cwd: root.path),
++    );
++    expect(checkpoints(), hasLength(1));
++    expect(warnings, isEmpty);
++  });
++
++  test(
++    'Claude Code turn records prompt_id and the payload transcript',
++    () async {
++      final transcript = File(p.join(home.path, 'claude.jsonl'))
++        ..writeAsStringSync('line\n');
++      final overrides = {'transcript_path': transcript.path};
++      await hook(
++        'claude-code',
++        'SessionStart',
++        stdinText: fixture(
++          'claude_code',
++          'session_start',
++          cwd: root.path,
++          overrides: overrides,
++        ),
++      );
++      expect(checkpoints(), isEmpty);
++      await hook(
++        'claude-code',
++        'UserPromptSubmit',
++        stdinText: fixture(
++          'claude_code',
++          'user_prompt_submit',
++          cwd: root.path,
++          overrides: overrides,
++        ),
++      );
++      final open = checkpoints().single;
++      expect(open.label, 'reply ok');
++      expect(open.agent!.agent, 'claude-code');
++      expect(open.agent!.sessionId, claudeSession);
++      expect(open.agent!.turnId, '66666666-7777-4888-8999-aaaaaaaaaaaa');
++
++      await hook(
++        'claude-code',
++        'StopFailure',
++        stdinText: fixture(
++          'claude_code',
++          'stop_failure',
++          cwd: root.path,
++          overrides: overrides,
++        ),
++      );
++      final closed = checkpoints().single;
++      expect(closed.status, CheckpointStatus.closed);
++      expect(closed.agent!.transcriptBytes, 5);
++      expect(warnings, isEmpty);
++    },
++  );
++
++  test('a missing transcript records no size or hash', () async {
++    await hook(
++      'claude-code',
++      'UserPromptSubmit',
++      stdinText: fixture('claude_code', 'user_prompt_submit', cwd: root.path),
++    );
++    await hook(
++      'claude-code',
++      'Stop',
++      stdinText: fixture('claude_code', 'stop', cwd: root.path),
++    );
++    final closed = checkpoints().single;
++    expect(closed.status, CheckpointStatus.closed);
++    expect(closed.agent!.transcriptPath, endsWith('$claudeSession.jsonl'));
++    expect(closed.agent!.transcriptBytes, isNull);
++    expect(closed.agent!.transcriptSha256, isNull);
++  });
++
++  test('a missed Stop is closed by the next prompt in the session', () async {
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++    );
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture(
++        'muse_code',
++        'user_prompt_submit',
++        cwd: root.path,
++        overrides: {'prompt': 'Second turn', 'turn_id': 'turn-0002'},
++      ),
++    );
++    final records = checkpoints();
++    expect(records.map((record) => record.status), [
++      CheckpointStatus.closed,
++      CheckpointStatus.open,
++    ]);
++    expect(records.last.label, 'Second turn');
++    expect(records.last.agent!.turnId, 'turn-0002');
++    expect(warnings.single, contains('left open by an earlier Muse Code turn'));
++  });
++
++  test('Interrupt closes a Muse turn but is ignored for Claude Code', () async {
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++    );
++    await hook(
++      'claude-code',
++      'Interrupt',
++      stdinText: fixture('muse_code', 'interrupt', cwd: root.path),
++    );
++    expect(checkpoints().single.status, CheckpointStatus.open);
++    await hook(
++      'muse-code',
++      'Interrupt',
++      stdinText: fixture('muse_code', 'interrupt', cwd: root.path),
++    );
++    expect(checkpoints().single.status, CheckpointStatus.closed);
++  });
++
++  test('a foreign active checkpoint is left alone', () async {
++    final service = CheckpointService(basePath: root.path, homePath: home.path);
++    final manual = await service.begin(label: 'manual', source: 'haven');
++    expect(manual.exitCode, 0, reason: manual.encode());
++
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++    );
++    await hook(
++      'muse-code',
++      'Stop',
++      stdinText: fixture('muse_code', 'stop', cwd: root.path),
++    );
++    final records = checkpoints();
++    expect(records, hasLength(1));
++    expect(records.single.source, 'haven');
++    expect(records.single.status, CheckpointStatus.open);
++    expect(warnings, hasLength(1));
++    expect(warnings.single, contains('source haven'));
++    expect(warnings.single, contains('No checkpoint was started'));
++  });
++
++  test('another session of the same agent is foreign', () async {
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++    );
++    final other = {'session_id': 'other-session'};
++    await hook(
++      'muse-code',
++      'Stop',
++      stdinText: fixture('muse_code', 'stop', cwd: root.path, overrides: other),
++    );
++    expect(checkpoints().single.status, CheckpointStatus.open);
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture(
++        'muse_code',
++        'user_prompt_submit',
++        cwd: root.path,
++        overrides: other,
++      ),
++    );
++    expect(checkpoints(), hasLength(1));
++    expect(warnings.single, contains('belongs to another owner'));
++  });
++
++  test('no workspace is a silent no-op', () async {
++    final outside = Directory(p.join(sandbox.path, 'elsewhere'))..createSync();
++    processCwd = outside.path;
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture('muse_code', 'user_prompt_submit', cwd: outside.path),
++    );
++    await hook('claude-code', 'Stop', stdinText: '');
++    expect(servicesCreated, 0);
++    expect(warnings, isEmpty);
++    expect(checkpoints(), isEmpty);
++  });
++
++  test('empty or invalid stdin falls back to MUSE_SESSION_ID', () async {
++    environment['MUSE_SESSION_ID'] = museSession;
++    await hook('muse-code', 'UserPromptSubmit', stdinText: '');
++    var record = checkpoints().single;
++    expect(record.status, CheckpointStatus.open);
++    expect(record.label, 'Muse Code turn');
++    expect(record.agent!.sessionId, museSession);
++    expect(record.agent!.turnId, isNull);
++
++    // A full payload from the same session can close it.
++    await hook('muse-code', 'Stop', stdinText: '{not json');
++    record = checkpoints().single;
++    expect(record.status, CheckpointStatus.closed);
++    expect(warnings, isEmpty);
++  });
++
++  test('a subdirectory cwd finds the enclosing workspace', () async {
++    final nested = Directory(p.join(root.path, 'lib', 'src'))
++      ..createSync(recursive: true);
++    processCwd = sandbox.path;
++    await hook(
++      'claude-code',
++      'UserPromptSubmit',
++      stdinText: fixture('claude_code', 'user_prompt_submit', cwd: nested.path),
++    );
++    expect(checkpoints().single.status, CheckpointStatus.open);
++    await hook(
++      'claude-code',
++      'Stop',
++      stdinText: fixture('claude_code', 'stop', cwd: nested.path),
++    );
++    expect(checkpoints().single.status, CheckpointStatus.closed);
++  });
++
++  test('a busy workspace lock is retried, then given up on', () async {
++    var lock = WorkspaceOperationLock.acquire(paths);
++    try {
++      await hook(
++        'muse-code',
++        'UserPromptSubmit',
++        stdinText: fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++        using: runner(lockBudget: const Duration(milliseconds: 150)),
++      );
++    } finally {
++      lock.close();
++    }
++    expect(checkpoints(), isEmpty);
++    expect(warnings.single, contains('Another checkpoint command is running'));
++
++    warnings.clear();
++    lock = WorkspaceOperationLock.acquire(paths);
++    final released = Future<void>.delayed(
++      const Duration(milliseconds: 150),
++      lock.close,
++    );
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++    );
++    await released;
++    expect(checkpoints().single.status, CheckpointStatus.open);
++    expect(warnings, isEmpty);
++  });
++
++  test('bad arguments warn and never throw', () async {
++    await runner().run(['codex', 'Stop']);
++    await runner().run(['muse-code']);
++    expect(warnings, hasLength(2));
++    expect(checkpoints(), isEmpty);
++  });
++
++  test('the command exits 0 and prints nothing even when it fails', () async {
++    final printed = <String>[];
++    final code = await runZoned(
++      () => runAgentHookCommand([
++        'muse-code',
++        'UserPromptSubmit',
++      ], readStdin: () async => throw StateError('stdin exploded')),
++      zoneSpecification: ZoneSpecification(
++        print: (_, _, _, message) => printed.add(message),
++      ),
++    );
++    expect(code, 0);
++    expect(printed, isEmpty);
++
++    final viaCli = await runZoned(
++      () => runAgentHookCommand(
++        ['muse-code', 'UserPromptSubmit'],
++        readStdin: () async =>
++            fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++        runner: runner(),
++      ),
++      zoneSpecification: ZoneSpecification(
++        print: (_, _, _, message) => printed.add(message),
++      ),
++    );
++    expect(viaCli, 0);
++    expect(printed, isEmpty);
++    expect(checkpoints().single.status, CheckpointStatus.open);
++  });
++
++  test('labels use the first line, trimmed to 100 characters', () {
++    expect(
++      agentTurnLabel(HookAgent.museCode, '  Fix the bug  \nmore detail'),
++      'Fix the bug',
++    );
++    expect(agentTurnLabel(HookAgent.claudeCode, '\n'), 'Claude Code turn');
++    final long = agentTurnLabel(HookAgent.museCode, 'é' * 150);
++    expect(long.runes.length, 100);
++    expect(long, endsWith('…'));
++  });
++
++  test('Muse transcript lookup rejects unsafe session IDs', () {
++    expect(findMuseTranscript('../escape', {'HOME': home.path}), isNull);
++    expect(findMuseTranscript(museSession, {'HOME': home.path}), isNull);
++  });
++}

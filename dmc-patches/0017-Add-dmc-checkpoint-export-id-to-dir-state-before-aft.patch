@@ -1,0 +1,860 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 11:15:45 -0500
+Subject: [PATCH 17/31] Add dmc checkpoint export <id> --to <dir> [--state
+ before|after]
+
+Writes the files of one checkpoint manifest (after by default; before
+uses the begin manifest) to a new or empty directory outside the
+workspace, for bisect. Bytes come from the snapshot store with every
+SHA-256 verified, and modes are restored (one chmod per mode). Absent
+entries, and left_scope/entered_scope files without a state in that
+manifest, are not written.
+
+Safety: the target must not exist or be an empty directory, must not be
+or contain the workspace (checked on both the given and the
+link-resolved paths), and is never followed if it is a link. Files are
+written to a temporary sibling and renamed into place, so a failed
+export (for example, a corrupted snapshot) leaves nothing behind. The
+workspace operation lock is held only while the manifest is read.
+
+--json --schema-version 1 returns checkpointId, state, directory,
+fileCount, totalBytes and manifestSha256. capabilities lists
+checkpoint.export and the features checkpointExport and
+policyDriftPerFile.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/dmc.dart                     |   1 +
+ lib/src/checkpoint_export.dart   | 380 +++++++++++++++++++++++++++++++
+ lib/src/cli.dart                 |  38 +++-
+ test/checkpoint_export_test.dart | 329 ++++++++++++++++++++++++++
+ 4 files changed, 747 insertions(+), 1 deletion(-)
+ create mode 100644 lib/src/checkpoint_export.dart
+ create mode 100644 test/checkpoint_export_test.dart
+
+diff --git a/lib/dmc.dart b/lib/dmc.dart
+index a741ab4f7bd44797335e152b3f51498b0d30820e..198da319d74bbbdb368dd670fceab96c228ef3e0 100644
+--- a/lib/dmc.dart
++++ b/lib/dmc.dart
+@@ -1,6 +1,7 @@
+ // Re-export public API
+ export 'src/agent_hooks.dart';
+ export 'src/config.dart';
++export 'src/checkpoint_export.dart';
+ export 'src/checkpoint_models.dart';
+ export 'src/checkpoint_operation_models.dart';
+ export 'src/checkpoint_operation_repository.dart';
+diff --git a/lib/src/checkpoint_export.dart b/lib/src/checkpoint_export.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e5b8c210f93b21fb876b3fb18949377e32b3db2
+--- /dev/null
++++ b/lib/src/checkpoint_export.dart
+@@ -0,0 +1,380 @@
++import 'dart:convert';
++import 'dart:io';
++import 'dart:math';
++
++import 'package:crypto/crypto.dart';
++import 'package:path/path.dart' as p;
++
++import 'checkpoint_models.dart';
++import 'checkpoint_repository.dart';
++import 'database.dart';
++import 'machine_output.dart';
++import 'snapshot_store.dart';
++import 'workspace.dart';
++import 'workspace_operation_lock.dart';
++
++/// Which manifest of a checkpoint to export.
++enum CheckpointExportState { before, after }
++
++class _ExportEntry {
++  final String relativePath;
++  final String snapshotPath;
++  final String hash;
++  final int? mode;
++
++  const _ExportEntry(
++    this.relativePath,
++    this.snapshotPath,
++    this.hash,
++    this.mode,
++  );
++}
++
++/// `dmc checkpoint export <id> --to <dir> [--state before|after]`: write the
++/// files of one checkpoint manifest to a directory outside the workspace,
++/// read from the snapshot store with every SHA-256 verified.
++///
++/// The export holds only files DMC protects; ignored dependencies and build
++/// output are not included. It never writes inside the workspace, so it is
++/// not a restore and needs no journal. Files are written to a temporary
++/// sibling of the target and renamed into place at the end, so a failed
++/// export leaves nothing behind.
++Future<CommandResult> exportCheckpoint(
++  String checkpointId, {
++  required String? to,
++  String state = 'after',
++  String? basePath,
++}) async {
++  const command = 'checkpoint.export';
++  final exportState = CheckpointExportState.values
++      .where((value) => value.name == state)
++      .firstOrNull;
++  if (exportState == null) {
++    return machineFailure(
++      command,
++      2,
++      'invalid_state',
++      'Export state must be before or after.',
++    );
++  }
++  if (to == null || to.trim().isEmpty) {
++    return machineFailure(
++      command,
++      2,
++      'export_target_required',
++      'Specify the export directory with --to.',
++    );
++  }
++  final paths = DmcPaths(basePath: basePath);
++  if (!File(paths.dbPath).existsSync()) {
++    return machineFailure(
++      command,
++      1,
++      'not_initialized',
++      'DMC is not initialized.',
++    );
++  }
++
++  final target = p.normalize(p.absolute(to));
++  final targetProblem = _checkTarget(paths.rootPath, target);
++  if (targetProblem != null) return targetProblem;
++
++  // Read the manifest under the workspace lock, then release it so a running
++  // agent turn is not blocked while the files are copied.
++  final List<_ExportEntry> entries;
++  final database = DmcDatabase(paths.dbPath);
++  WorkspaceOperationLock? lock;
++  try {
++    lock = WorkspaceOperationLock.acquire(paths);
++    database.initialize();
++    final repository = CheckpointRepository(database);
++    final checkpoint = repository.getCheckpoint(checkpointId);
++    if (checkpoint == null) {
++      return machineFailure(
++        command,
++        3,
++        'checkpoint_not_found',
++        'Checkpoint $checkpointId was not found.',
++      );
++    }
++    final exportable = exportState == CheckpointExportState.after
++        ? checkpoint.status == CheckpointStatus.closed
++        : const {
++            CheckpointStatus.open,
++            CheckpointStatus.closing,
++            CheckpointStatus.closed,
++          }.contains(checkpoint.status);
++    if (!exportable) {
++      return machineFailure(
++        command,
++        3,
++        'checkpoint_not_exportable',
++        exportState == CheckpointExportState.after
++            ? 'Checkpoint $checkpointId is ${checkpoint.status.name}; the after state needs a closed checkpoint.'
++            : 'Checkpoint $checkpointId is ${checkpoint.status.name}; its before manifest is not available.',
++      );
++    }
++    final collected = <_ExportEntry>[];
++    for (final file in repository.getFiles(checkpointId)) {
++      final before = exportState == CheckpointExportState.before;
++      final kind = before ? file.beforeKind : file.afterKind;
++      if (kind != CheckpointFileKind.file) continue;
++      final snapshotId = before ? file.beforeSnapshotId : file.afterSnapshotId;
++      final hash = before ? file.beforeHash : file.afterHash;
++      final row = snapshotId == null
++          ? null
++          : database.getSnapshotById(snapshotId);
++      if (row == null ||
++          hash == null ||
++          row.hash != hash ||
++          isTombstoneSnapshot(hash: row.hash, snapshotPath: row.snapshotPath)) {
++        return machineFailure(
++          command,
++          5,
++          'snapshot_reference_invalid',
++          'The ${exportState.name} state of ${file.filePath} has no valid snapshot.',
++          path: file.filePath,
++        );
++      }
++      collected.add(
++        _ExportEntry(
++          file.filePath,
++          row.snapshotPath,
++          hash,
++          before ? file.beforeMode : file.afterMode,
++        ),
++      );
++    }
++    entries = collected;
++  } on WorkspaceOperationBusy {
++    return machineFailure(
++      command,
++      3,
++      'checkpoint_busy',
++      'Another checkpoint command is running in this workspace.',
++    );
++  } catch (error) {
++    return machineFailure(command, 1, 'export_failed', error.toString());
++  } finally {
++    database.close();
++    lock?.close();
++  }
++
++  final parent = p.dirname(target);
++  final random = Random.secure();
++  final suffix = List.generate(
++    8,
++    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
++  ).join();
++  final staging = Directory(
++    p.join(parent, '.${p.basename(target)}.dmc-export-$suffix'),
++  );
++  try {
++    staging.createSync();
++    var totalBytes = 0;
++    final byMode = <int, List<String>>{};
++    for (final entry in entries) {
++      final destination = _destination(staging.path, entry.relativePath);
++      final bytes = SnapshotStore.readVerifiedBytes(
++        paths.snapshotsPath,
++        entry.snapshotPath,
++        entry.hash,
++      );
++      _createDirectories(staging.path, p.dirname(destination));
++      if (FileSystemEntity.typeSync(destination, followLinks: false) !=
++          FileSystemEntityType.notFound) {
++        throw FileSystemException('Export path already exists', destination);
++      }
++      File(destination).writeAsBytesSync(bytes, flush: true);
++      totalBytes += bytes.length;
++      if (entry.mode != null) {
++        (byMode[entry.mode!] ??= []).add(destination);
++      }
++    }
++    if (!Platform.isWindows) {
++      for (final group in byMode.entries) {
++        for (var start = 0; start < group.value.length; start += 200) {
++          final batch = group.value.sublist(
++            start,
++            min(start + 200, group.value.length),
++          );
++          final result = Process.runSync('chmod', [
++            group.key.toRadixString(8),
++            ...batch,
++          ]);
++          if (result.exitCode != 0) {
++            throw FileSystemException(
++              'Could not set file permissions: ${result.stderr}',
++              batch.first,
++            );
++          }
++        }
++      }
++    }
++    if (Platform.isWindows &&
++        FileSystemEntity.typeSync(target, followLinks: false) ==
++            FileSystemEntityType.directory) {
++      // Windows cannot rename onto an existing directory; it was checked to
++      // be empty. POSIX rename replaces an empty directory atomically.
++      Directory(target).deleteSync();
++    }
++    staging.renameSync(target);
++    return CommandResult(
++      command: command,
++      exitCode: 0,
++      data: {
++        'checkpointId': checkpointId,
++        'state': exportState.name,
++        'directory': target,
++        'fileCount': entries.length,
++        'totalBytes': totalBytes,
++        'manifestSha256': exportManifestSha256([
++          for (final entry in entries)
++            (path: entry.relativePath, hash: entry.hash, mode: entry.mode),
++        ]),
++      },
++    );
++  } catch (error) {
++    try {
++      if (staging.existsSync()) staging.deleteSync(recursive: true);
++    } catch (_) {
++      // Best effort; the failure below is what matters.
++    }
++    final integrity = error is SnapshotIntegrityException;
++    return machineFailure(
++      command,
++      integrity ? 5 : 1,
++      integrity ? 'snapshot_unavailable' : 'export_failed',
++      '$error Nothing was exported.',
++    );
++  }
++}
++
++/// SHA-256 of the exported manifest: one `<mode>\t<sha256>\t<path>\n` line
++/// per file, sorted by POSIX path, with the mode in octal (`-` when none was
++/// recorded). Two exports with the same hash hold the same bytes and modes.
++String exportManifestSha256(
++  Iterable<({String path, String hash, int? mode})> entries,
++) {
++  final lines = [
++    for (final entry in entries)
++      (path: p.split(entry.path).join('/'), hash: entry.hash, mode: entry.mode),
++  ]..sort((a, b) => a.path.compareTo(b.path));
++  final text = lines
++      .map(
++        (line) =>
++            '${line.mode?.toRadixString(8) ?? '-'}\t${line.hash}\t${line.path}\n',
++      )
++      .join();
++  return sha256.convert(utf8.encode(text)).toString();
++}
++
++CommandResult? _checkTarget(String root, String target) {
++  const command = 'checkpoint.export';
++  CommandResult unsafe(String message) =>
++      machineFailure(command, 2, 'unsafe_export_target', message);
++  final canonicalRoot = Directory(root).resolveSymbolicLinksSync();
++  final canonicalTarget = _canonical(target);
++  for (final (rootForm, targetForm) in [
++    (root, target),
++    (canonicalRoot, canonicalTarget),
++  ]) {
++    if (p.equals(rootForm, targetForm) || p.isWithin(rootForm, targetForm)) {
++      return unsafe(
++        'The export directory $target is inside the workspace. Export outside it.',
++      );
++    }
++    if (p.isWithin(targetForm, rootForm)) {
++      return unsafe(
++        'The workspace is inside the export directory $target. Export elsewhere.',
++      );
++    }
++  }
++  final parent = p.dirname(target);
++  if (FileSystemEntity.typeSync(parent) != FileSystemEntityType.directory) {
++    return machineFailure(
++      command,
++      2,
++      'export_parent_missing',
++      'The parent directory of $target does not exist.',
++    );
++  }
++  switch (FileSystemEntity.typeSync(target, followLinks: false)) {
++    case FileSystemEntityType.notFound:
++      return null;
++    case FileSystemEntityType.directory:
++      if (Directory(target).listSync(followLinks: false).isEmpty) return null;
++      return machineFailure(
++        command,
++        4,
++        'export_target_not_empty',
++        'The export directory $target is not empty.',
++      );
++    default:
++      return machineFailure(
++        command,
++        4,
++        'export_target_not_directory',
++        '$target exists and is not a directory (links are never followed).',
++      );
++  }
++}
++
++/// [path] with its nearest existing ancestor's links resolved.
++String _canonical(String path) {
++  var existing = path;
++  final rest = <String>[];
++  while (FileSystemEntity.typeSync(existing) == FileSystemEntityType.notFound) {
++    final parent = p.dirname(existing);
++    if (parent == existing) return path;
++    rest.insert(0, p.basename(existing));
++    existing = parent;
++  }
++  try {
++    return p.joinAll([Directory(existing).resolveSymbolicLinksSync(), ...rest]);
++  } on FileSystemException {
++    return path;
++  }
++}
++
++String _destination(String staging, String relativePath) {
++  final parts = p.split(relativePath);
++  if (p.isAbsolute(relativePath) ||
++      parts.isEmpty ||
++      parts.any((part) => part.isEmpty || part == '.' || part == '..')) {
++    throw FileSystemException('Unsafe manifest path', relativePath);
++  }
++  return p.joinAll([staging, ...parts]);
++}
++
++/// Create [directory] below [staging] one component at a time, refusing any
++/// component that exists as something other than a real directory.
++void _createDirectories(String staging, String directory) {
++  var current = staging;
++  for (final part in p.split(p.relative(directory, from: staging))) {
++    if (part == '.') continue;
++    current = p.join(current, part);
++    switch (FileSystemEntity.typeSync(current, followLinks: false)) {
++      case FileSystemEntityType.notFound:
++        Directory(current).createSync();
++      case FileSystemEntityType.directory:
++        break;
++      default:
++        throw FileSystemException('Export path is not a directory', current);
++    }
++  }
++}
++
++List<String> checkpointExportHumanLines(CommandResult result) {
++  final data = result.data;
++  return [
++    if (result.ok) ...[
++      '[DMC] Exported checkpoint ${data['checkpointId']} (${data['state']} state) to ${data['directory']}',
++      'Files: ${data['fileCount']}; bytes: ${data['totalBytes']}',
++      'Manifest SHA-256: ${data['manifestSha256']}',
++      'Only files DMC protects are exported. Ignored dependencies and build output are not included.',
++    ],
++    for (final error in result.errors)
++      '[DMC] Error${error.path == null ? '' : ' ${error.path}'}: ${error.message}',
++  ];
++}
+diff --git a/lib/src/cli.dart b/lib/src/cli.dart
+index 65b557020bf2ff592b1fbeb785025ca9d7d6a170..e0ee26cd196c226019c38c6f0cb9732566830de1 100644
+--- a/lib/src/cli.dart
++++ b/lib/src/cli.dart
+@@ -3,6 +3,7 @@ import 'dart:io';
+ 
+ import 'package:args/args.dart';
+ import 'agent_hooks.dart';
++import 'checkpoint_export.dart';
+ import 'checkpoint_service.dart';
+ import 'checkpoint_restore_service.dart';
+ import 'daemon.dart';
+@@ -203,7 +204,7 @@ Future<int> _runCheckpointCommand(ArgResults command) async {
+   final subcommand = command.command;
+   if (subcommand == null) {
+     print(
+-      'Usage: dmc checkpoint <begin|close|list|show|diff|restore|redo|recover|release>',
++      'Usage: dmc checkpoint <begin|close|list|show|diff|restore|redo|recover|release|export>',
+     );
+     return 2;
+   }
+@@ -334,6 +335,24 @@ Future<int> _runCheckpointCommand(ArgResults command) async {
+         );
+       }
+       break;
++    case 'export':
++      if (subcommand.rest.length != 1) {
++        result = machineFailure(
++          'checkpoint.export',
++          2,
++          'checkpoint_id_required',
++          'Specify exactly one checkpoint ID.',
++        );
++      } else {
++        result = await invoke(
++          () => exportCheckpoint(
++            subcommand.rest.single,
++            to: subcommand['to'] as String?,
++            state: subcommand['state'] as String,
++          ),
++        );
++      }
++      break;
+     case 'close':
+     case 'show':
+     case 'diff':
+@@ -369,6 +388,8 @@ Future<int> _runCheckpointCommand(ArgResults command) async {
+   } else {
+     final lines = {'restore', 'redo', 'recover'}.contains(subcommand.name)
+         ? checkpointOperationHumanLines(result)
++        : subcommand.name == 'export'
++        ? checkpointExportHumanLines(result)
+         : checkpointHumanLines(result);
+     for (final line in lines) {
+       print(line);
+@@ -411,6 +432,7 @@ int _runCapabilitiesCommand({
+         'checkpoint.redo',
+         'checkpoint.recover',
+         'checkpoint.release',
++        'checkpoint.export',
+       ],
+       'features': {
+         'checkpointApply': true,
+@@ -420,6 +442,8 @@ int _runCapabilitiesCommand({
+         'previewByDefault': true,
+         'conflictBlocksAllWrites': true,
+         'fileContentsInJson': false,
++        'checkpointExport': true,
++        'policyDriftPerFile': true,
+       },
+       'cancellation': {
+         'capture': 'detect_interrupted_checkpoint',
+@@ -699,7 +723,19 @@ Future<int> _runCli(List<String> args) async {
+     negatable: false,
+     help: 'Return all targets to their recorded pre-operation state',
+   );
++  final checkpointExport = checkpointCommand.addCommand('export');
++  checkpointExport.addOption(
++    'to',
++    help: 'New or empty directory outside the workspace',
++  );
++  checkpointExport.addOption(
++    'state',
++    allowed: ['before', 'after'],
++    defaultsTo: 'after',
++    help: 'Which checkpoint manifest to export',
++  );
+   for (final checkpointSubcommand in [
++    checkpointExport,
+     checkpointBegin,
+     checkpointList,
+     checkpointCommand.addCommand('close'),
+diff --git a/test/checkpoint_export_test.dart b/test/checkpoint_export_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..0dcb74d4340881df8015194538bb24b58a442d0a
+--- /dev/null
++++ b/test/checkpoint_export_test.dart
+@@ -0,0 +1,329 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:dmc/dmc.dart';
++import 'package:path/path.dart' as p;
++import 'package:test/test.dart';
++
++void main() {
++  late Directory sandbox;
++  late Directory root;
++  late Directory home;
++
++  File file(String relative) =>
++      File(p.joinAll([root.path, ...relative.split('/')]));
++
++  void write(String relative, String contents) => file(relative)
++    ..createSync(recursive: true)
++    ..writeAsStringSync(contents);
++
++  CheckpointService service() =>
++      CheckpointService(basePath: root.path, homePath: home.path);
++
++  /// Every file below [directory] outside the vault: POSIX relative path →
++  /// contents.
++  Map<String, String> tree(Directory directory) => {
++    for (final entity in directory.listSync(
++      recursive: true,
++      followLinks: false,
++    ))
++      if (entity is File &&
++          p.split(p.relative(entity.path, from: directory.path)).first !=
++              '.dmc')
++        p.split(p.relative(entity.path, from: directory.path)).join('/'): entity
++            .readAsStringSync(),
++  };
++
++  Future<CommandResult> export(
++    String id,
++    String to, {
++    String state = 'after',
++  }) => exportCheckpoint(id, to: to, state: state, basePath: root.path);
++
++  /// A closed checkpoint with a modified, a deleted, a created, an unchanged
++  /// and an executable file.
++  Future<String> turn() async {
++    write('modified.txt', 'before');
++    write('deleted.txt', 'deleted at close');
++    write('unchanged.txt', 'same');
++    write('nested dir/ü.txt', 'nested');
++    write('run.sh', '#!/bin/sh\necho hi\n');
++    if (!Platform.isWindows) {
++      Process.runSync('chmod', ['755', file('run.sh').path]);
++    }
++    final begin = await service().begin(source: 'test');
++    expect(begin.exitCode, 0, reason: begin.encode());
++    final id = (begin.data['checkpoint'] as Map)['id'] as String;
++    write('modified.txt', 'after');
++    file('deleted.txt').deleteSync();
++    write('created.txt', 'created');
++    final close = await service().close(id);
++    expect(close.exitCode, 0, reason: close.encode());
++    return id;
++  }
++
++  setUp(() async {
++    sandbox = Directory.systemTemp.createTempSync('dmc_export_');
++    root = Directory(p.join(sandbox.path, 'export ws ü'))..createSync();
++    home = Directory(p.join(sandbox.path, 'home'))..createSync();
++    await initDmc(basePath: root.path);
++  });
++
++  tearDown(() {
++    if (sandbox.existsSync()) sandbox.deleteSync(recursive: true);
++  });
++
++  test('exports the before and after manifests with modes', () async {
++    final id = await turn();
++    final workspaceBefore = tree(root);
++
++    final afterDir = p.join(sandbox.path, 'out after');
++    final after = await export(id, afterDir);
++    expect(after.exitCode, 0, reason: after.encode());
++    expect(tree(Directory(afterDir)), {
++      'modified.txt': 'after',
++      'created.txt': 'created',
++      'unchanged.txt': 'same',
++      'nested dir/ü.txt': 'nested',
++      'run.sh': '#!/bin/sh\necho hi\n',
++    });
++    expect(after.data['checkpointId'], id);
++    expect(after.data['state'], 'after');
++    expect(after.data['directory'], afterDir);
++    expect(after.data['fileCount'], 5);
++    expect(
++      after.data['totalBytes'],
++      'after'.length +
++          'created'.length +
++          'same'.length +
++          'nested'.length +
++          '#!/bin/sh\necho hi\n'.length,
++    );
++
++    final beforeDir = p.join(sandbox.path, 'out before');
++    final before = await export(id, beforeDir, state: 'before');
++    expect(before.exitCode, 0, reason: before.encode());
++    expect(tree(Directory(beforeDir)), {
++      'modified.txt': 'before',
++      'deleted.txt': 'deleted at close',
++      'unchanged.txt': 'same',
++      'nested dir/ü.txt': 'nested',
++      'run.sh': '#!/bin/sh\necho hi\n',
++    });
++    expect(before.data['manifestSha256'], isNot(after.data['manifestSha256']));
++
++    if (!Platform.isWindows) {
++      for (final directory in [afterDir, beforeDir]) {
++        expect(
++          File(p.join(directory, 'run.sh')).statSync().mode & 0x1ff,
++          0x1ed, // 0755
++        );
++        expect(
++          File(p.join(directory, 'unchanged.txt')).statSync().mode &
++              0x49, // no execute bits
++          0,
++        );
++      }
++    }
++
++    // The same state exported again has the same manifest hash.
++    final again = await export(id, p.join(sandbox.path, 'again'));
++    expect(again.data['manifestSha256'], after.data['manifestSha256']);
++    // The working copy was never touched.
++    expect(tree(root), workspaceBefore);
++  });
++
++  test('an existing empty directory is accepted', () async {
++    final id = await turn();
++    final target = Directory(p.join(sandbox.path, 'empty'))..createSync();
++    final result = await export(id, target.path);
++    expect(result.exitCode, 0, reason: result.encode());
++    expect(tree(target), contains('created.txt'));
++  });
++
++  test('a corrupted snapshot fails and leaves nothing behind', () async {
++    final id = await turn();
++    final view = await service().show(id);
++    final created = (view.data['files'] as List).cast<Map>().singleWhere(
++      (entry) => entry['path'] == 'created.txt',
++    );
++    final database = DmcDatabase(DmcPaths(basePath: root.path).dbPath)
++      ..initialize();
++    final row = database.getSnapshotById(
++      (created['after'] as Map)['snapshotId'] as int,
++    )!;
++    database.close();
++    File(
++      p.join(DmcPaths(basePath: root.path).snapshotsPath, row.snapshotPath),
++    ).writeAsStringSync('tampered');
++    final before = sandbox.listSync().map((entity) => entity.path).toSet();
++
++    final target = p.join(sandbox.path, 'broken');
++    final result = await export(id, target);
++    expect(result.exitCode, 5, reason: result.encode());
++    expect(result.errors.single.code, 'snapshot_unavailable');
++    expect(FileSystemEntity.typeSync(target), FileSystemEntityType.notFound);
++    expect(sandbox.listSync().map((entity) => entity.path).toSet(), before);
++  });
++
++  test('unsafe, non-empty and non-directory targets are refused', () async {
++    final id = await turn();
++    final inside = await export(id, p.join(root.path, 'export'));
++    expect(inside.exitCode, 2);
++    expect(inside.errors.single.code, 'unsafe_export_target');
++    expect(Directory(p.join(root.path, 'export')).existsSync(), isFalse);
++
++    final containing = await export(id, sandbox.path);
++    expect(containing.errors.single.code, 'unsafe_export_target');
++    final itself = await export(id, root.path);
++    expect(itself.errors.single.code, 'unsafe_export_target');
++
++    final busy = Directory(p.join(sandbox.path, 'busy'))..createSync();
++    File(p.join(busy.path, 'keep.txt')).writeAsStringSync('keep');
++    final nonEmpty = await export(id, busy.path);
++    expect(nonEmpty.exitCode, 4);
++    expect(nonEmpty.errors.single.code, 'export_target_not_empty');
++    expect(tree(busy), {'keep.txt': 'keep'});
++
++    final plain = File(p.join(sandbox.path, 'plain.txt'))
++      ..writeAsStringSync('x');
++    expect(
++      (await export(id, plain.path)).errors.single.code,
++      'export_target_not_directory',
++    );
++
++    final orphan = await export(id, p.join(sandbox.path, 'no', 'such', 'dir'));
++    expect(orphan.errors.single.code, 'export_parent_missing');
++
++    if (!Platform.isWindows) {
++      final real = Directory(p.join(sandbox.path, 'real'))..createSync();
++      final link = Link(p.join(sandbox.path, 'link'))..createSync(real.path);
++      final linked = await export(id, link.path);
++      expect(linked.errors.single.code, 'export_target_not_directory');
++      expect(real.listSync(), isEmpty);
++      // A link that points into the workspace is caught by the canonical check.
++      final intoWorkspace = Link(p.join(sandbox.path, 'into'))
++        ..createSync(root.path);
++      final sneaky = await export(id, p.join(intoWorkspace.path, 'out'));
++      expect(sneaky.errors.single.code, 'unsafe_export_target');
++      expect(Directory(p.join(root.path, 'out')).existsSync(), isFalse);
++    }
++
++    expect(
++      (await export(
++        id,
++        p.join(sandbox.path, 'x'),
++        state: 'middle',
++      )).errors.single.code,
++      'invalid_state',
++    );
++  });
++
++  test('an open checkpoint exports its before state only', () async {
++    write('a.txt', 'a');
++    final begin = await service().begin(source: 'test');
++    final id = (begin.data['checkpoint'] as Map)['id'] as String;
++    final after = await export(id, p.join(sandbox.path, 'after'));
++    expect(after.exitCode, 3);
++    expect(after.errors.single.code, 'checkpoint_not_exportable');
++    final before = await export(
++      id,
++      p.join(sandbox.path, 'before'),
++      state: 'before',
++    );
++    expect(before.exitCode, 0, reason: before.encode());
++    expect(tree(Directory(p.join(sandbox.path, 'before'))), {'a.txt': 'a'});
++    expect(
++      (await export(
++        'cp_missing',
++        p.join(sandbox.path, 'm'),
++      )).errors.single.code,
++      'checkpoint_not_found',
++    );
++  });
++
++  test('left_scope and entered_scope files follow each manifest', () async {
++    write('.dmcignore', 'generated/\n');
++    write('generated/model.txt', 'generated');
++    write('secret.txt', 'secret before');
++    final begin = await service().begin(source: 'test');
++    final id = (begin.data['checkpoint'] as Map)['id'] as String;
++    write('.dmcignore', 'secret.txt\n');
++    write('secret.txt', 'secret after');
++    final close = await service().close(id);
++    expect(close.exitCode, 0, reason: close.encode());
++
++    final before = await export(
++      id,
++      p.join(sandbox.path, 'before'),
++      state: 'before',
++    );
++    expect(before.exitCode, 0, reason: before.encode());
++    // left_scope keeps its before state; entered_scope has none.
++    expect(tree(Directory(p.join(sandbox.path, 'before'))), {
++      '.dmcignore': 'generated/\n',
++      'secret.txt': 'secret before',
++    });
++    final after = await export(id, p.join(sandbox.path, 'after'));
++    expect(after.exitCode, 0, reason: after.encode());
++    // entered_scope has an after state; left_scope has none.
++    expect(tree(Directory(p.join(sandbox.path, 'after'))), {
++      '.dmcignore': 'secret.txt\n',
++      'generated/model.txt': 'generated',
++    });
++  });
++
++  test(
++    'the CLI prints one JSON envelope and capabilities list export',
++    () async {
++      final id = await turn();
++      final previous = Directory.current;
++      final output = <String>[];
++      Directory.current = root;
++      try {
++        await runZoned(
++          () async {
++            await runCli(['capabilities', '--json']);
++            await runCli([
++              'checkpoint',
++              'export',
++              id,
++              '--to',
++              p.join(sandbox.path, 'cli'),
++              '--json',
++              '--schema-version',
++              '1',
++            ]);
++          },
++          zoneSpecification: ZoneSpecification(
++            print: (_, _, _, message) => output.add(message),
++          ),
++        );
++      } finally {
++        Directory.current = previous;
++      }
++      expect(output, hasLength(2));
++      final capabilities = jsonDecode(output.first) as Map;
++      expect(
++        (capabilities['data'] as Map)['commands'],
++        contains('checkpoint.export'),
++      );
++      expect(
++        ((capabilities['data'] as Map)['features'] as Map)['checkpointExport'],
++        isTrue,
++      );
++      final exported = jsonDecode(output.last) as Map;
++      expect(exported['ok'], isTrue);
++      expect(exported['command'], 'checkpoint.export');
++      expect((exported['data'] as Map).keys, [
++        'checkpointId',
++        'state',
++        'directory',
++        'fileCount',
++        'totalBytes',
++        'manifestSha256',
++      ]);
++    },
++  );
++}

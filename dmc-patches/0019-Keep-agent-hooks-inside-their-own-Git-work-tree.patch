@@ -1,0 +1,540 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 15:25:07 -0500
+Subject: [PATCH 19/31] Keep agent hooks inside their own Git work tree
+
+muse -w creates a linked worktree inside the repository
+(<repo>/.muse/worktrees/<date>-<hex>), so a hook there walked up into
+the main work tree's .dmc/ and recorded the turn in the wrong vault.
+dmc agent-hook now records nothing, and warns on stderr, when the
+nearest .git marker above its cwd sits below the .dmc root: a linked
+worktree, a nested repository or a submodule. It uses marker positions
+only, with no git process, and still exits 0 with empty stdout. Each
+worktree gets its own vault and checkpoints after dmc init there.
+
+status and doctor show whether the workspace is a linked worktree and
+its main work tree, or, for a main work tree, its linked worktrees and
+which have a vault. They read Git's metadata files; no git process.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/dmc.dart              |   1 +
+ lib/src/agent_hooks.dart  |  29 ++++
+ lib/src/doctor.dart       |   2 +
+ lib/src/git_worktree.dart | 114 +++++++++++++++
+ lib/src/status.dart       |   2 +
+ test/worktree_test.dart   | 285 ++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 433 insertions(+)
+ create mode 100644 lib/src/git_worktree.dart
+ create mode 100644 test/worktree_test.dart
+
+diff --git a/lib/dmc.dart b/lib/dmc.dart
+index 198da319d74bbbdb368dd670fceab96c228ef3e0..06854c75fd14daa639679fcc39bb8c2da6018c05 100644
+--- a/lib/dmc.dart
++++ b/lib/dmc.dart
+@@ -16,6 +16,7 @@ export 'src/database.dart';
+ export 'src/diff.dart';
+ export 'src/gc.dart';
+ export 'src/git_ignore.dart';
++export 'src/git_worktree.dart';
+ export 'src/hook_installer.dart';
+ export 'src/machine_output.dart';
+ export 'src/status.dart';
+diff --git a/lib/src/agent_hooks.dart b/lib/src/agent_hooks.dart
+index 4b6845819911c22d513f95ec81a07c707e359fa0..295d35f49f7c41777622e0a20d3292b0126f0c7f 100644
+--- a/lib/src/agent_hooks.dart
++++ b/lib/src/agent_hooks.dart
+@@ -129,6 +129,28 @@ String? findDmcWorkspace(String start) {
+   }
+ }
+ 
++/// The work tree that owns [start] when it is not the dmc workspace [root]:
++/// the nearest `.git` marker (directory or file) at or above [start] sits
++/// below [root]. That is a linked worktree, a nested repository or a
++/// submodule, and its files belong to a different history. Uses marker
++/// positions only; no git process runs in the hook.
++String? foreignWorkTree(String start, String root) {
++  final normalizedRoot = p.normalize(p.absolute(root));
++  var current = p.normalize(p.absolute(start));
++  while (p.isWithin(normalizedRoot, current)) {
++    final type = FileSystemEntity.typeSync(
++      p.join(current, '.git'),
++      followLinks: false,
++    );
++    if (type == FileSystemEntityType.directory ||
++        type == FileSystemEntityType.file) {
++      return current;
++    }
++    current = p.dirname(current);
++  }
++  return null;
++}
++
+ final _safeSessionId = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]*$');
+ 
+ /// Locate Muse Code's `session.jsonl` for [sessionId] under
+@@ -224,6 +246,13 @@ class AgentHookRunner {
+         : currentDirectory();
+     final root = findDmcWorkspace(start);
+     if (root == null) return;
++    final otherWorkTree = foreignWorkTree(start, root);
++    if (otherWorkTree != null) {
++      _warn(
++        '$event: $start belongs to another Git work tree ($otherWorkTree), not to the dmc workspace $root. Nothing was recorded. Run "dmc init" in that work tree to give it its own vault.',
++      );
++      return;
++    }
+ 
+     final service = serviceFactory(root);
+     var transcriptPath = payload.transcriptPath;
+diff --git a/lib/src/doctor.dart b/lib/src/doctor.dart
+index 9ee76b446b0efecdda148edde0eff043376591bd..f4c08ea6ec4a048568751d614d7b9e71969b8443 100644
+--- a/lib/src/doctor.dart
++++ b/lib/src/doctor.dart
+@@ -6,6 +6,7 @@ import 'checkpoint_repository.dart';
+ import 'checkpoint_operation_repository.dart';
+ import 'checkpoint_operation_models.dart';
+ import 'database.dart';
++import 'git_worktree.dart';
+ import 'ignore.dart';
+ import 'snapshot_store.dart';
+ import 'workspace.dart';
+@@ -189,6 +190,7 @@ Future<bool> runDoctor({String? basePath, String? homePath}) async {
+   }
+   final ignorePolicy = await describeIgnorePolicy(paths.rootPath);
+   print('Ignore policy: ${ignorePolicy.text}');
++  describeGitWorktree(paths.rootPath)?.lines.forEach(print);
+   print('DB access: ok');
+   print('Database integrity: ${databaseCheck.join(', ')}');
+   print('Missing snapshot files: ${missingSnapshotFiles.length}');
+diff --git a/lib/src/git_worktree.dart b/lib/src/git_worktree.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce758441c6d7ce9885c76f0e78e32e1f21907f28
+--- /dev/null
++++ b/lib/src/git_worktree.dart
+@@ -0,0 +1,114 @@
++import 'dart:io';
++
++import 'package:path/path.dart' as p;
++
++import 'git_ignore.dart';
++import 'workspace.dart';
++
++/// How a workspace sits among Git worktrees, read from `.git` markers and
++/// Git's metadata files only (no git process).
++class GitWorktreeInfo {
++  /// The work tree that contains the workspace root.
++  final String workTree;
++
++  /// True when [workTree] is a linked worktree: its `.git` is a file that
++  /// points into the main repository's `worktrees/` directory.
++  final bool linked;
++
++  /// The main work tree, when it can be read from the metadata.
++  final String? mainWorkTree;
++
++  /// For the main work tree: its linked worktrees and whether each has a dmc
++  /// vault. Empty for a linked worktree.
++  final List<({String path, bool hasVault})> linkedWorktrees;
++
++  const GitWorktreeInfo({
++    required this.workTree,
++    required this.linked,
++    this.mainWorkTree,
++    this.linkedWorktrees = const [],
++  });
++
++  /// The lines `status` and `doctor` print.
++  List<String> get lines => linked
++      ? [
++          'Git worktree: linked worktree of ${mainWorkTree ?? 'an unknown main work tree'}',
++          'Worktree vault: this worktree has its own dmc vault and checkpoints, separate from the main work tree.',
++        ]
++      : [
++          'Git worktree: main work tree, ${linkedWorktrees.length} linked worktree(s)',
++          for (final worktree in linkedWorktrees)
++            'Linked worktree: ${worktree.path} (${worktree.hasVault ? 'own dmc vault' : 'no dmc vault; run "dmc init" there to protect it'})',
++        ];
++}
++
++/// Describe the Git worktree that contains [root], or null outside Git.
++GitWorktreeInfo? describeGitWorktree(String root) {
++  final marker = findGitMarker(root);
++  if (marker == null) return null;
++  final workTree = p.dirname(marker);
++  if (FileSystemEntity.typeSync(marker, followLinks: false) ==
++      FileSystemEntityType.file) {
++    final gitDir = _readGitDir(marker);
++    if (gitDir == null || p.basename(p.dirname(gitDir)) != 'worktrees') {
++      // A submodule or a separate git dir: not a linked worktree.
++      return GitWorktreeInfo(workTree: workTree, linked: false);
++    }
++    String? main;
++    final commonDir = _readLine(p.join(gitDir, 'commondir'));
++    if (commonDir != null) {
++      final common = p.normalize(
++        p.isAbsolute(commonDir) ? commonDir : p.join(gitDir, commonDir),
++      );
++      if (p.basename(common) == '.git') main = p.dirname(common);
++    }
++    return GitWorktreeInfo(
++      workTree: workTree,
++      linked: true,
++      mainWorkTree: main,
++    );
++  }
++  final worktrees = <({String path, bool hasVault})>[];
++  final metadata = Directory(p.join(marker, 'worktrees'));
++  if (metadata.existsSync()) {
++    for (final entry
++        in metadata.listSync(followLinks: false).whereType<Directory>()) {
++      final pointer = _readLine(p.join(entry.path, 'gitdir'));
++      if (pointer == null) continue;
++      final path = p.dirname(p.normalize(pointer));
++      worktrees.add((
++        path: path,
++        hasVault:
++            FileSystemEntity.typeSync(
++              p.join(path, dmcDirName),
++              followLinks: false,
++            ) ==
++            FileSystemEntityType.directory,
++      ));
++    }
++    worktrees.sort((a, b) => a.path.compareTo(b.path));
++  }
++  return GitWorktreeInfo(
++    workTree: workTree,
++    linked: false,
++    linkedWorktrees: worktrees,
++  );
++}
++
++String? _readGitDir(String markerFile) {
++  final line = _readLine(markerFile);
++  if (line == null || !line.startsWith('gitdir:')) return null;
++  final value = line.substring('gitdir:'.length).trim();
++  return p.normalize(
++    p.isAbsolute(value) ? value : p.join(p.dirname(markerFile), value),
++  );
++}
++
++String? _readLine(String path) {
++  try {
++    final text = File(path).readAsStringSync().trim();
++    return text.isEmpty ? null : text.split(RegExp(r'\r?\n')).first.trim();
++  } on FileSystemException {
++    return null;
++  }
++}
+diff --git a/lib/src/status.dart b/lib/src/status.dart
+index 5edaf3121783e301176e908fac914a84f7d2ecb2..9aa2a46c4d3efeca6387b87fd7b8946e5e51a654 100644
+--- a/lib/src/status.dart
++++ b/lib/src/status.dart
+@@ -6,6 +6,7 @@ import 'checkpoint_operation_repository.dart';
+ import 'checkpoint_operation_models.dart';
+ import 'daemon.dart';
+ import 'database.dart';
++import 'git_worktree.dart';
+ import 'ignore.dart';
+ import 'workspace.dart';
+ import 'watcher_control.dart';
+@@ -82,6 +83,7 @@ Future<int> showStatus({
+     print(
+       'Ignore policy: ${(await describeIgnorePolicy(paths.rootPath)).text}',
+     );
++    describeGitWorktree(paths.rootPath)?.lines.forEach(print);
+   }
+   if (live != null || health != null) {
+     final state = live ?? health!;
+diff --git a/test/worktree_test.dart b/test/worktree_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..32b9a4ff6fab7ac814e8eb5c862c7a9a36d80b00
+--- /dev/null
++++ b/test/worktree_test.dart
+@@ -0,0 +1,285 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:dmc/dmc.dart';
++import 'package:path/path.dart' as p;
++import 'package:test/test.dart';
++
++/// Each Git worktree has its own dmc vault: an agent hook never records a
++/// turn from one work tree in another's vault, and checkpoints in different
++/// worktrees are independent.
++void main() {
++  late Directory sandbox;
++  late Directory root;
++  late Directory home;
++  late List<String> warnings;
++
++  Future<void> git(List<String> args, {required String cwd}) async {
++    final result = await Process.run('git', [
++      '-c',
++      'user.name=dmc test',
++      '-c',
++      'user.email=dmc@example.invalid',
++      '-c',
++      'protocol.file.allow=always',
++      '-c',
++      'core.autocrlf=false',
++      ...args,
++    ], workingDirectory: cwd);
++    expect(
++      result.exitCode,
++      0,
++      reason: 'git ${args.join(' ')}: ${result.stderr}',
++    );
++  }
++
++  void write(String directory, String relative, String contents) =>
++      File(p.joinAll([directory, ...relative.split('/')]))
++        ..createSync(recursive: true)
++        ..writeAsStringSync(contents);
++
++  String read(String directory, String relative) =>
++      File(p.joinAll([directory, ...relative.split('/')])).readAsStringSync();
++
++  /// A Muse Code hook call from [cwd] for [session].
++  Future<void> hook(
++    String event,
++    String cwd, {
++    required String session,
++    String turn = 'turn-1',
++  }) =>
++      AgentHookRunner(
++        environment: const {},
++        currentDirectory: () => cwd,
++        serviceFactory: (rootPath) =>
++            CheckpointService(basePath: rootPath, homePath: home.path),
++        warn: warnings.add,
++      ).run(
++        ['muse-code', event],
++        stdinText: jsonEncode({
++          'hook_event_name': event,
++          'session_id': session,
++          'turn_id': turn,
++          'cwd': cwd,
++          'transcript_path': null,
++          if (event == 'UserPromptSubmit') 'prompt': 'edit in $session',
++        }),
++      );
++
++  List<CheckpointRecord> checkpoints(String workspace) {
++    final database = DmcDatabase(DmcPaths(basePath: workspace).dbPath)
++      ..initialize();
++    try {
++      return CheckpointRepository(database).listCheckpoints();
++    } finally {
++      database.close();
++    }
++  }
++
++  Future<String> addWorktree(String name) async {
++    final path = p.join(root.path, '.worktrees', name);
++    await git(['worktree', 'add', '-q', '-b', name, path], cwd: root.path);
++    return path;
++  }
++
++  Future<List<String>> printed(Future<void> Function() action) async {
++    final output = <String>[];
++    await runZoned(
++      action,
++      zoneSpecification: ZoneSpecification(
++        print: (_, _, _, message) => output.add(message),
++      ),
++    );
++    return output;
++  }
++
++  setUp(() async {
++    warnings = [];
++    sandbox = Directory.systemTemp.createTempSync('dmc_worktree_');
++    root = Directory(p.join(sandbox.path, 'main repo'))..createSync();
++    home = Directory(p.join(sandbox.path, 'home'))..createSync();
++    await git(['init', '-q', '.'], cwd: root.path);
++    write(root.path, 'app.txt', 'app v1');
++    await git(['add', 'app.txt'], cwd: root.path);
++    await git(['commit', '-q', '-m', 'init'], cwd: root.path);
++    // Muse Code keeps its worktrees inside the repo and excludes them.
++    File(
++      p.join(root.path, '.git', 'info', 'exclude'),
++    ).writeAsStringSync('/.worktrees/\n', mode: FileMode.append);
++    await initDmc(basePath: root.path);
++  });
++
++  tearDown(() {
++    if (sandbox.existsSync()) sandbox.deleteSync(recursive: true);
++  });
++
++  test(
++    'a hook from a linked worktree without a vault records nothing',
++    () async {
++      final worktree = await addWorktree('session-a');
++      await hook('UserPromptSubmit', worktree, session: 'a');
++      write(worktree, 'app.txt', 'edited in the worktree');
++      await hook('Stop', worktree, session: 'a');
++      expect(checkpoints(root.path), isEmpty);
++      expect(warnings, hasLength(2));
++      expect(warnings.first, contains('belongs to another Git work tree'));
++      expect(warnings.first, contains('dmc init'));
++    },
++  );
++
++  test('after dmc init the worktree uses its own vault', () async {
++    final worktree = await addWorktree('session-a');
++    await initDmc(basePath: worktree);
++    await hook('UserPromptSubmit', worktree, session: 'a');
++    write(worktree, 'app.txt', 'edited in the worktree');
++    await hook('Stop', worktree, session: 'a');
++    expect(warnings, isEmpty);
++    expect(checkpoints(root.path), isEmpty);
++    final own = checkpoints(worktree);
++    expect(own.single.status, CheckpointStatus.closed);
++    expect(own.single.source, 'muse-code');
++    // A subdirectory of the worktree still belongs to it.
++    final nested = p.join(worktree, 'src', 'deep');
++    Directory(nested).createSync(recursive: true);
++    await hook('UserPromptSubmit', nested, session: 'a', turn: 'turn-2');
++    await hook('Stop', nested, session: 'a', turn: 'turn-2');
++    expect(checkpoints(worktree), hasLength(2));
++    expect(warnings, isEmpty);
++  });
++
++  test(
++    'two worktrees taking turns get independent, restorable checkpoints',
++    () async {
++      final a = await addWorktree('session-a');
++      final b = await addWorktree('session-b');
++      await initDmc(basePath: a);
++      await initDmc(basePath: b);
++
++      await hook('UserPromptSubmit', a, session: 'a');
++      await hook('UserPromptSubmit', b, session: 'b');
++      write(a, 'app.txt', 'approach A');
++      write(b, 'app.txt', 'approach B');
++      write(b, 'extra.txt', 'only in B');
++      await hook('Stop', a, session: 'a');
++      await hook('Stop', b, session: 'b');
++      expect(warnings, isEmpty);
++      expect(checkpoints(root.path), isEmpty);
++
++      final checkpointA = checkpoints(a).single;
++      final checkpointB = checkpoints(b).single;
++      expect(checkpointA.agent!.sessionId, 'a');
++      expect(checkpointB.agent!.sessionId, 'b');
++      final filesA =
++          (await CheckpointService(
++                basePath: a,
++                homePath: home.path,
++              ).diff(checkpointA.id)).data['files']
++              as List;
++      final filesB =
++          (await CheckpointService(
++                basePath: b,
++                homePath: home.path,
++              ).diff(checkpointB.id)).data['files']
++              as List;
++      Map<String, Object?> changes(List files) => {
++        for (final file in files.cast<Map>())
++          if (file['change'] != 'unchanged')
++            file['path'] as String: file['change'],
++      };
++      expect(changes(filesA), {'app.txt': 'modified'});
++      expect(changes(filesB), {'app.txt': 'modified', 'extra.txt': 'created'});
++
++      // Restore B only; A and the main work tree are untouched.
++      final restoredB = await CheckpointRestoreService(
++        basePath: b,
++      ).restore(checkpointB.id, apply: true);
++      expect(restoredB.exitCode, 0, reason: restoredB.encode());
++      expect(read(b, 'app.txt'), 'app v1');
++      expect(File(p.join(b, 'extra.txt')).existsSync(), isFalse);
++      expect(read(a, 'app.txt'), 'approach A');
++      expect(read(root.path, 'app.txt'), 'app v1');
++
++      final restoredA = await CheckpointRestoreService(
++        basePath: a,
++      ).restore(checkpointA.id, apply: true);
++      expect(restoredA.exitCode, 0, reason: restoredA.encode());
++      expect(read(a, 'app.txt'), 'app v1');
++    },
++  );
++
++  test('a nested repository and a submodule are ignored', () async {
++    final nested = Directory(p.join(root.path, 'vendor', 'lib'))
++      ..createSync(recursive: true);
++    await git(['init', '-q', '.'], cwd: nested.path);
++    await hook('UserPromptSubmit', nested.path, session: 'n');
++
++    final source = Directory(p.join(sandbox.path, 'source'))..createSync();
++    await git(['init', '-q', '.'], cwd: source.path);
++    write(source.path, 'lib.txt', 'lib');
++    await git(['add', 'lib.txt'], cwd: source.path);
++    await git(['commit', '-q', '-m', 'lib'], cwd: source.path);
++    await git(['submodule', 'add', '-q', source.path, 'sub'], cwd: root.path);
++    final submodule = p.join(root.path, 'sub');
++    expect(
++      FileSystemEntity.typeSync(p.join(submodule, '.git')),
++      FileSystemEntityType.file,
++    );
++    await hook('UserPromptSubmit', submodule, session: 's');
++
++    expect(checkpoints(root.path), isEmpty);
++    expect(warnings, hasLength(2));
++    expect(warnings, everyElement(contains('another Git work tree')));
++
++    // The main work tree itself still records turns.
++    await hook('UserPromptSubmit', root.path, session: 'main');
++    await hook('Stop', root.path, session: 'main');
++    expect(checkpoints(root.path).single.status, CheckpointStatus.closed);
++    expect(warnings, hasLength(2));
++  });
++
++  test('status and doctor report the worktree layout', () async {
++    final a = await addWorktree('session-a');
++    await addWorktree('session-b');
++    await initDmc(basePath: a);
++    final canonicalA = Directory(a).resolveSymbolicLinksSync();
++    final canonicalRoot = root.resolveSymbolicLinksSync();
++
++    final mainStatus = await printed(
++      () => showStatus(basePath: root.path, homePath: home.path),
++    );
++    expect(
++      mainStatus,
++      contains('Git worktree: main work tree, 2 linked worktree(s)'),
++    );
++    expect(
++      mainStatus,
++      contains('Linked worktree: $canonicalA (own dmc vault)'),
++    );
++    expect(
++      mainStatus,
++      contains(allOf(contains('session-b'), contains('no dmc vault'))),
++    );
++
++    final worktreeStatus = await printed(
++      () => showStatus(basePath: a, homePath: home.path),
++    );
++    expect(
++      worktreeStatus,
++      contains('Git worktree: linked worktree of $canonicalRoot'),
++    );
++    expect(
++      worktreeStatus,
++      contains(startsWith('Worktree vault: this worktree')),
++    );
++
++    final doctor = await printed(() async {
++      await runDoctor(basePath: a, homePath: home.path);
++    });
++    expect(doctor, contains('Git worktree: linked worktree of $canonicalRoot'));
++
++    final info = describeGitWorktree(a)!;
++    expect(info.linked, isTrue);
++    expect(describeGitWorktree(sandbox.path), isNull);
++  });
++}

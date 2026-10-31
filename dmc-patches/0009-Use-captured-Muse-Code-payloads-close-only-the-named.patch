@@ -1,0 +1,262 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Mon, 26 Oct 2026 20:17:21 -0500
+Subject: [PATCH 09/31] Use captured Muse Code payloads; close only the named
+ turn
+
+Replace the synthetic Muse fixtures with scrubbed captures from Muse
+Code 1.4.13 on macOS (exec run, unreachable-endpoint StopFailure, and an
+interactive Esc for Interrupt).
+
+Muse runs Interrupt handlers async, so a late Interrupt could arrive
+after the next UserPromptSubmit and close the new turn's checkpoint.
+Close events that carry a turn ID now close only a checkpoint with the
+same turn; UserPromptSubmit still closes any turn left open in its
+session.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/src/agent_hooks.dart                      | 17 ++++++--
+ test/agent_hooks_test.dart                    | 41 ++++++++++++++++++-
+ test/fixtures/agent_hooks/README.md           | 12 +++---
+ .../agent_hooks/muse_code/interrupt.json      |  8 ++--
+ .../agent_hooks/muse_code/session_end.json    |  7 ++--
+ .../agent_hooks/muse_code/session_start.json  |  8 ++--
+ test/fixtures/agent_hooks/muse_code/stop.json | 11 ++---
+ .../agent_hooks/muse_code/stop_failure.json   |  9 ++--
+ .../muse_code/user_prompt_submit.json         |  9 ++--
+ 9 files changed, 89 insertions(+), 33 deletions(-)
+
+diff --git a/lib/src/agent_hooks.dart b/lib/src/agent_hooks.dart
+index bc1e4357c3103c45f6fe87bafd70a1a0ebf339ec..4b6845819911c22d513f95ec81a07c707e359fa0 100644
+--- a/lib/src/agent_hooks.dart
++++ b/lib/src/agent_hooks.dart
+@@ -232,9 +232,20 @@ class AgentHookRunner {
+         payload.sessionId != null) {
+       transcriptPath = findMuseTranscript(payload.sessionId!, environment);
+     }
+-    bool owns(CheckpointRecord checkpoint) =>
+-        checkpoint.agent?.agent == agent.id &&
+-        checkpoint.agent?.sessionId == payload.sessionId;
++    // A close event that names a turn closes only that turn: Muse Code runs
++    // Interrupt handlers async, so one can arrive after the next prompt.
++    // UserPromptSubmit closes any turn left open in its session.
++    bool owns(CheckpointRecord checkpoint) {
++      final context = checkpoint.agent;
++      if (context?.agent != agent.id ||
++          context?.sessionId != payload.sessionId) {
++        return false;
++      }
++      return action != AgentHookAction.close ||
++          payload.turnId == null ||
++          context?.turnId == null ||
++          context?.turnId == payload.turnId;
++    }
+ 
+     final closed = await _withLockRetry(
+       () => service.closeActive(owns: owns, transcriptPath: transcriptPath),
+diff --git a/test/agent_hooks_test.dart b/test/agent_hooks_test.dart
+index 6edece4741a1d713a7647da71cc02ae91c448280..11aa458a0de4f6fdc55dbeea1e33f73f770995e1 100644
+--- a/test/agent_hooks_test.dart
++++ b/test/agent_hooks_test.dart
+@@ -11,6 +11,7 @@ import 'package:test/test.dart';
+ 
+ const museSession = '22222222-3333-4444-8555-666666666666';
+ const claudeSession = '11111111-2222-4333-8444-555555555555';
++const museTurn = '33333333-4444-7555-8666-777777777777';
+ 
+ /// The package root, resolved from `package:dmc` rather than the process cwd:
+ /// `dart test` runs files in parallel isolates of one process, and other test
+@@ -128,9 +129,9 @@ void main() {
+     expect(records, hasLength(1));
+     expect(records.single.status, CheckpointStatus.open);
+     expect(records.single.source, 'muse-code');
+-    expect(records.single.label, 'Refactor the auth module');
++    expect(records.single.label, 'reply with the word ok');
+     expect(records.single.agent!.sessionId, museSession);
+-    expect(records.single.agent!.turnId, 'turn-0001');
++    expect(records.single.agent!.turnId, museTurn);
+     expect(records.single.agent!.transcriptPath, transcript.path);
+     expect(records.single.agent!.transcriptBytes, isNull);
+ 
+@@ -288,6 +289,42 @@ void main() {
+     expect(checkpoints().single.status, CheckpointStatus.closed);
+   });
+ 
++  test('a late async Interrupt does not close the next turn', () async {
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture('muse_code', 'user_prompt_submit', cwd: root.path),
++    );
++    await hook(
++      'muse-code',
++      'UserPromptSubmit',
++      stdinText: fixture(
++        'muse_code',
++        'user_prompt_submit',
++        cwd: root.path,
++        overrides: {'prompt': 'Second turn', 'turn_id': 'turn-0002'},
++      ),
++    );
++    await hook(
++      'muse-code',
++      'Interrupt',
++      stdinText: fixture('muse_code', 'interrupt', cwd: root.path),
++    );
++    expect(checkpoints().last.status, CheckpointStatus.open);
++    await hook(
++      'muse-code',
++      'Stop',
++      stdinText: fixture(
++        'muse_code',
++        'stop',
++        cwd: root.path,
++        overrides: {'turn_id': 'turn-0002'},
++      ),
++    );
++    expect(checkpoints().last.status, CheckpointStatus.closed);
++    expect(warnings, hasLength(1));
++  });
++
+   test('a foreign active checkpoint is left alone', () async {
+     final service = CheckpointService(basePath: root.path, homePath: home.path);
+     final manual = await service.begin(label: 'manual', source: 'haven');
+diff --git a/test/fixtures/agent_hooks/README.md b/test/fixtures/agent_hooks/README.md
+index e7c96eff2ec9ce7e4f05fafde8cc43bf97c28d0a..e3d7dac405675b64dead7827d2101cf6f766924f 100644
+--- a/test/fixtures/agent_hooks/README.md
++++ b/test/fixtures/agent_hooks/README.md
+@@ -6,11 +6,11 @@ Stdin payloads for `dmc agent-hook`. See `docs/AGENT-HOOKS.md` for how each was
+   in a throwaway repository's `.claude/settings.local.json`. `stop_failure.json` comes from a run
+   whose API endpoint refused connections. Scrubbed: session and prompt UUIDs replaced, home
+   directory and project path replaced with `/home/dev` and `/home/dev/project`.
+-- `muse_code/`: **synthetic**. Muse Code was not installed on the machine that wrote these, so
+-  they follow the researched 1.4.x field list (snake_case `hook_event_name`, `session_id`, `cwd`,
+-  `transcript_path` (null here), `model`, `permission_mode`, plus `prompt`/`turn_id` on
+-  UserPromptSubmit, `turn_id`/`last_assistant_message`/`stop_hook_active` on Stop, and `reason` on
+-  SessionEnd). The StopFailure and Interrupt field sets are a guess. Replace them with captured
+-  payloads once a probe runs against a real Muse Code install.
++- `muse_code/`: **captured** from Muse Code 1.4.13 on macOS on 2026-10-26 with a probe hook
++  (`.muse/hooks.json` in a trusted throwaway repository, and `~/.config/muse/settings.json`).
++  `session_start`, `user_prompt_submit`, `stop` and `session_end` come from one
++  `muse exec "reply with the word ok"` run; `stop_failure.json` from a run with `--base-url`
++  pointing at a closed local port; `interrupt.json` from an interactive turn cancelled with Esc.
++  Scrubbed: session and turn UUIDs replaced, `cwd` replaced with `/Users/dev/project`.
+ 
+ Tests overwrite `cwd` with a temporary workspace, so the paths here are placeholders.
+diff --git a/test/fixtures/agent_hooks/muse_code/interrupt.json b/test/fixtures/agent_hooks/muse_code/interrupt.json
+index 769ed5d0da4b06705e67e517c20e544903957bf9..ad5657b58c5b9f679c86caf171165e1ef7f680b9 100644
+--- a/test/fixtures/agent_hooks/muse_code/interrupt.json
++++ b/test/fixtures/agent_hooks/muse_code/interrupt.json
+@@ -1,9 +1,9 @@
+ {
+   "hook_event_name": "Interrupt",
+   "session_id": "22222222-3333-4444-8555-666666666666",
+-  "cwd": "/home/dev/project",
++  "turn_id": "33333333-4444-7555-8666-777777777777",
++  "cwd": "/Users/dev/project",
+   "transcript_path": null,
+-  "model": "muse-spark-1.3",
+-  "permission_mode": "default",
+-  "turn_id": "turn-0001"
++  "model": "muse-spark-1.3-contributor",
++  "permission_mode": "default"
+ }
+diff --git a/test/fixtures/agent_hooks/muse_code/session_end.json b/test/fixtures/agent_hooks/muse_code/session_end.json
+index 04b47242ede82a8290e78f298f19ae02ddd86d6f..30c2baa2745caf309bf648e8c2c03bbd99b43be9 100644
+--- a/test/fixtures/agent_hooks/muse_code/session_end.json
++++ b/test/fixtures/agent_hooks/muse_code/session_end.json
+@@ -1,9 +1,10 @@
+ {
+   "hook_event_name": "SessionEnd",
++  "reason": "other",
+   "session_id": "22222222-3333-4444-8555-666666666666",
+-  "cwd": "/home/dev/project",
++  "cwd": "/Users/dev/project",
+   "transcript_path": null,
+-  "model": "muse-spark-1.3",
++  "model": "muse-spark-1.3-contributor",
+   "permission_mode": "default",
+-  "reason": "exit"
++  "model_provider": "meta"
+ }
+diff --git a/test/fixtures/agent_hooks/muse_code/session_start.json b/test/fixtures/agent_hooks/muse_code/session_start.json
+index 79bb80bf26300cb335fb6c5a0efdb07c2e65f60d..5cc4935c660157f7caf612f3956b11e2dcbb677e 100644
+--- a/test/fixtures/agent_hooks/muse_code/session_start.json
++++ b/test/fixtures/agent_hooks/muse_code/session_start.json
+@@ -1,8 +1,10 @@
+ {
+   "hook_event_name": "SessionStart",
++  "source": "startup",
+   "session_id": "22222222-3333-4444-8555-666666666666",
+-  "cwd": "/home/dev/project",
++  "cwd": "/Users/dev/project",
+   "transcript_path": null,
+-  "model": "muse-spark-1.3",
+-  "permission_mode": "default"
++  "model": "muse-spark-1.3-contributor",
++  "permission_mode": "default",
++  "model_provider": "meta"
+ }
+diff --git a/test/fixtures/agent_hooks/muse_code/stop.json b/test/fixtures/agent_hooks/muse_code/stop.json
+index f45fbb7928da948dfa906fa848a52ca001436005..5abecdc675f0fb85a3e4046d8992471d24389328 100644
+--- a/test/fixtures/agent_hooks/muse_code/stop.json
++++ b/test/fixtures/agent_hooks/muse_code/stop.json
+@@ -1,11 +1,12 @@
+ {
+   "hook_event_name": "Stop",
++  "stop_hook_active": false,
++  "last_assistant_message": "ok",
+   "session_id": "22222222-3333-4444-8555-666666666666",
+-  "cwd": "/home/dev/project",
++  "turn_id": "33333333-4444-7555-8666-777777777777",
++  "cwd": "/Users/dev/project",
+   "transcript_path": null,
+-  "model": "muse-spark-1.3",
++  "model": "muse-spark-1.3-contributor",
+   "permission_mode": "default",
+-  "turn_id": "turn-0001",
+-  "last_assistant_message": "Done.",
+-  "stop_hook_active": false
++  "model_provider": "meta"
+ }
+diff --git a/test/fixtures/agent_hooks/muse_code/stop_failure.json b/test/fixtures/agent_hooks/muse_code/stop_failure.json
+index 9c2279730f9c6284335b44a9524cec77a5dc4c34..6bed7fd7f831985b540702291aa5938df136f078 100644
+--- a/test/fixtures/agent_hooks/muse_code/stop_failure.json
++++ b/test/fixtures/agent_hooks/muse_code/stop_failure.json
+@@ -1,9 +1,12 @@
+ {
+   "hook_event_name": "StopFailure",
++  "error": "unknown",
++  "last_assistant_message": "transport error: error sending request for url (http://127.0.0.1:9/responses)",
+   "session_id": "22222222-3333-4444-8555-666666666666",
+-  "cwd": "/home/dev/project",
++  "turn_id": "33333333-4444-7555-8666-777777777777",
++  "cwd": "/Users/dev/project",
+   "transcript_path": null,
+-  "model": "muse-spark-1.3",
++  "model": "muse-spark-1.3-contributor",
+   "permission_mode": "default",
+-  "turn_id": "turn-0001"
++  "model_provider": "meta"
+ }
+diff --git a/test/fixtures/agent_hooks/muse_code/user_prompt_submit.json b/test/fixtures/agent_hooks/muse_code/user_prompt_submit.json
+index de8e610be06f080366312da1e17b4ce92b670941..9a7105f2b8600bec93ded4f0cb9ad7cc4bcc79af 100644
+--- a/test/fixtures/agent_hooks/muse_code/user_prompt_submit.json
++++ b/test/fixtures/agent_hooks/muse_code/user_prompt_submit.json
+@@ -1,10 +1,11 @@
+ {
+   "hook_event_name": "UserPromptSubmit",
++  "prompt": "reply with the word ok",
+   "session_id": "22222222-3333-4444-8555-666666666666",
+-  "cwd": "/home/dev/project",
++  "turn_id": "33333333-4444-7555-8666-777777777777",
++  "cwd": "/Users/dev/project",
+   "transcript_path": null,
+-  "model": "muse-spark-1.3",
++  "model": "muse-spark-1.3-contributor",
+   "permission_mode": "default",
+-  "prompt": "Refactor the auth module\nand keep the tests green",
+-  "turn_id": "turn-0001"
++  "model_provider": "meta"
+ }

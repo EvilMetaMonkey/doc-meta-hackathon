@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 11:19:12 -0500
+Subject: [PATCH 18/31] Document per-file policy drift and checkpoint export
+
+AGENTS.md records the drift rule, schema 5 and the export command (with
+the note that exports hold only protected files, so bisect must set up
+ignored dependencies). docs/HAVEN-INTEGRATION.md lists the additive
+JSON: closePolicyFingerprint, file scope, the plan's skipped list and
+the export result. The website's checkpoints page, README, CHANGELOG
+and STATUS.md are updated; the policy_changed item leaves Broken.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md                                     |  7 ++--
+ CHANGELOG.md                                  |  2 ++
+ README.md                                     |  3 +-
+ docs/HAVEN-INTEGRATION.md                     |  7 ++--
+ .../src/content/docs/docs/dmc/checkpoints.md  | 32 ++++++++++++++++---
+ 5 files changed, 41 insertions(+), 10 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index ad94964d4a00cb562a39918d305bde59ccadff5f..ef134a75f192dbdea6c37a0d1ea07c00279cf192 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -103,12 +103,14 @@ The most important product qualities are:
+ - DMC working directory: `.dmc/`
+ - Snapshots folder: `.dmc/snapshots/`
+ - Database file: `.dmc/dmc.db`
+-- Schema version: 4 (`PRAGMA user_version`); history, marks, and restore events retain their legacy meanings. Checkpoint operation and per-file journal tables are additive and foreign-key constrained. Version 4 adds nullable agent-turn context columns to `checkpoints` (agent, session, turn, transcript path, and transcript size/SHA-256 at close); see `docs/AGENT-HOOKS.md`.
++- Schema version: 5 (`PRAGMA user_version`); history, marks, and restore events retain their legacy meanings. Checkpoint operation and per-file journal tables are additive and foreign-key constrained. Version 4 adds nullable agent-turn context columns to `checkpoints` (agent, session, turn, transcript path, and transcript size/SHA-256 at close); see `docs/AGENT-HOOKS.md`. Version 5 adds nullable `checkpoints.close_policy_fingerprint` and `checkpoint_files.scope_change` (`left_scope`/`entered_scope`) for ignore-policy drift; existing rows are not rewritten.
+ - One checkpoint may be `creating`, `open`, or `closing`. `invalid`, `closed`, and `released` checkpoints do not block a new begin. Explicit release can abandon an interrupted state.
+-- Begin and close each scan and verify eligible file state. Policy changes between them invalidate close. A rename is represented as deletion plus creation.
++- Begin and close each scan and verify eligible file state. A rename is represented as deletion plus creation.
++- **Ignore-policy drift is handled per file.** If the policy fingerprint at close differs from begin (an agent edited `.gitignore`, added a nested one, or `.dmcignore` or the config changed), close still succeeds: the close-time policy decides what is protected, `closePolicyFingerprint` records it, and a non-fatal `policy_changed` warning is added. A file in scope at both ends is captured and restorable as usual. A file in scope at begin but not at close (including a deleted file the new policy ignores) is `left_scope`: its before snapshot is kept, no after state is captured, and restore and redo skip it. A file excluded at begin (it or a parent was recorded as an exclusion) but in scope at close is `entered_scope`: it has no before state (recorded as `absent`), restore never deletes or overwrites it, and redo only confirms it still matches its after state (otherwise a `workspace_drift` conflict). Both have a null `change` and appear under `skipped` in the restore/redo plan, which does not block apply. The ignore files themselves restore like any other in-scope file. Checkpoints that were already `invalid` stay invalid.
+ - Manifest and operation references pin history until explicit release. Release is blocked while an operation is incomplete, then clears snapshot IDs while retaining hashes, modes, classifications, issues, and audit metadata.
+ - Machine envelope schema and checkpoint manifest schema are version 1. JSON mode writes exactly one JSON object to stdout. Every envelope includes the DMC version, exit code, command, canonical workspace identity, data, warnings, and errors. `--schema-version 1` lets Haven reject an incompatible executable before work begins.
+ - Checkpoint restore/redo previews by default and requires `--apply`. Never route checkpoint recovery through legacy burst/task/mark semantics. Stop the watcher and all writers before apply.
++- `checkpoint export <id> --to <dir> [--state before|after]` (default `after`, which needs a closed checkpoint; `before` works for open, closing and closed) writes one manifest's files, with recorded modes and every SHA-256 verified, to a new or empty directory that is neither inside the workspace nor contains it (checked on given and link-resolved paths; a link target is refused). It writes to a temporary sibling and renames at the end, so a failure leaves nothing; it holds the workspace lock only while reading the manifest. It never writes inside the workspace, so it is not a restore and has no journal. JSON data: `checkpointId`, `state`, `directory`, `fileCount`, `totalBytes`, `manifestSha256` (SHA-256 of sorted `<octal mode or ->\t<sha256>\t<posix path>\n` lines). **The export holds only protected files: ignored dependencies (`node_modules`, `.dart_tool`, build output) are not included, so bisect must set them up itself.**
+ - An incomplete operation must be handled with `checkpoint recover <id> --resume|--rollback`; status and doctor expose these journals.
+ - Add `--preview` to inspect recovery targets and conflicts without changing the workspace or journal. Gate clients on `features.operationRecoveryPreview`. See `docs/RECOVERY-PREVIEW.md`.
+ - Default ignored directories: `.git`, `.dmc`, `.dart_tool`, `build`, `node_modules`. They apply in both modes below.
+@@ -284,6 +286,7 @@ Use `docs/TESTER-READINESS-AUDIT.md` as the original audit and the Phase 2/3 han
+ - `dart run bin/dmc.dart checkpoint recover <operation-id> --resume`
+ - `dart run bin/dmc.dart checkpoint diff <checkpoint-id>`
+ - `dart run bin/dmc.dart checkpoint release <checkpoint-id>`
++- `dart run bin/dmc.dart checkpoint export <checkpoint-id> --to <dir> [--state before|after] [--json --schema-version 1]`
+ - `dart run bin/dmc.dart capabilities --json`
+ - `dart run bin/dmc.dart hooks install --agent claude-code --dmc-command "dart run <repo>/bin/dmc.dart"` (preview; add `--apply` to write; see `docs/AGENT-HOOKS.md`)
+ - `dmc agent-hook <muse-code|claude-code> <event>` (called by agent hooks; always exits 0 with empty stdout)
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 200ad1dbd30522d884d7b3265a2f3b9fe28e280d..33af89c4207a12c7d9abbe9548b425db758b66ad 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ - The policy fingerprint in Git mode (version 2) covers the mode and every ignore source Git reads; editing any of them mid-turn fails close with `policy_changed`. `.gitignore` files that tools write into directories Git already ignores (pytest, venv) do not count.
+ - Checkpoint restore and redo refuse Git-ignored targets with a `git_ignored` conflict, so they never create, overwrite or delete a Git-ignored file. The watcher checks Git once per drain (`git check-ignore --stdin -z`). `status` and `doctor` print the active ignore policy.
+ - CI runs `dart test --concurrency=1`, the documented gate, which fixes the older-test `Directory.current` race.
++- Handle ignore-policy drift per file. When the ignore policy or config changes during a checkpoint (an agent edits `.gitignore`, adds a nested one, or `.dmcignore` changes), close now succeeds with a non-fatal `policy_changed` warning instead of invalidating the checkpoint. The close-time policy decides what is protected, and both fingerprints are recorded (additive `closePolicyFingerprint`). Files that left protection (`left_scope`, before state kept) or entered it (`entered_scope`, no before state) get an additive `scope` field and a null `change`. Restore and redo list them under an additive `skipped` field and never write them; redo of a changed `entered_scope` file is a `workspace_drift` conflict. Schema 5 adds the two nullable columns without rewriting existing rows, and checkpoints that were already invalid stay invalid.
++- Add `dmc checkpoint export <id> --to <dir> [--state before|after]` for bisect. It writes one manifest's files (after by default), with every SHA-256 verified and modes restored, to a new or empty directory outside the workspace, through a temporary sibling that is renamed at the end. A failure leaves nothing behind, and the workspace lock is held only while the manifest is read. JSON returns `checkpointId`, `state`, `directory`, `fileCount`, `totalBytes` and `manifestSha256`. `capabilities` adds `checkpoint.export` and the features `checkpointExport` and `policyDriftPerFile`. Ignored dependencies are not exported.
+ 
+ ## 1.1.0-dev.5.1 — Unreleased
+ 
+diff --git a/README.md b/README.md
+index ae44b68ea694de31c2356cec787aa6e0a56af818..b7f4bdedbee52f5fa6f1522029bb281aa0288ff5 100644
+--- a/README.md
++++ b/README.md
+@@ -177,7 +177,7 @@ New users and Haven should use this workflow for agent runs.
+ | `dmc checkpoint close <id>` | Captures and verifies the post-run manifest and classifies changes. Stop the agent first. |
+ | `dmc checkpoint list [--limit <count>]` | Lists recent checkpoints, protection counts, lifecycle states, and recorded operation IDs. |
+ | `dmc checkpoint show <id>` | Shows lifecycle state, protected files, exclusions, and fatal issues. |
+-| `dmc checkpoint diff <id>` | Lists modified, created, and deleted paths; it does not change files. |
++| `dmc checkpoint diff <id>` | Lists modified, created, and deleted paths (and files whose protection changed because the ignore policy changed); it does not change files. |
+ | `dmc checkpoint restore <id> [--dry-run]` | Preflights and previews the whole checkpoint. Preview is the default. |
+ | `dmc checkpoint restore <id> --apply` | Restores all changed eligible files through a durable operation journal. The watcher must be stopped. |
+ | `dmc checkpoint redo <id> [--dry-run]` | Previews the post-run state after a completed checkpoint restore. |
+@@ -194,6 +194,7 @@ These commands support diagnosis, interrupted recovery, integration, and storage
+ | `dmc checkpoint recover <operation-id> --resume` | Continues an interrupted checkpoint restore or redo. |
+ | `dmc checkpoint recover <operation-id> --rollback` | Returns every target to its captured pre-operation state. |
+ | `dmc checkpoint release <id>` | Explicitly abandons/purges retention pins while keeping small metadata. |
++| `dmc checkpoint export <id> --to <dir> [--state before\|after]` | Writes the project as it was at a checkpoint (after state by default) to a new or empty directory outside the project, without touching the working copy. Only protected files are included: ignored dependencies such as `node_modules` are not. |
+ | `dmc capabilities --json --schema-version 1` | Reports the stable Haven contract, schema versions, checkpoint commands, safety capabilities, and cancellation requirements. |
+ | `dmc gc --dry-run` | Previews removal of expired, unprotected history. |
+ | `dmc gc` | Removes that expired history. Stop the watcher and other dmc commands first. |
+diff --git a/docs/HAVEN-INTEGRATION.md b/docs/HAVEN-INTEGRATION.md
+index aef102009894436d5ab302e8a541143dbe8ad070..fc636324743930469a891fc5ad81053aab958af0 100644
+--- a/docs/HAVEN-INTEGRATION.md
++++ b/docs/HAVEN-INTEGRATION.md
+@@ -51,10 +51,11 @@ All fields listed here are part of machine schema 1. Additive fields may appear
+ | `checkpoint recover` | `mode`, `operationId`, `operation`; a blocked recovery also includes `conflicts` |
+ | `checkpoint recover --preview` | On a valid pending operation: `preview`, `applied`, `canRecover`, `mode`, `operationId`, `checkpointId`, `operation`, `actions`, `conflicts` |
+ | `checkpoint release` | `checkpoint`, `issues` |
++| `checkpoint export` | `checkpointId`, `state` (`before`/`after`), `directory`, `fileCount`, `totalBytes`, `manifestSha256` |
+ 
+-A checkpoint summary includes `id`, nullable `label`, `source`, `status`, `manifestVersion`, millisecond timestamps, `policyFingerprint`, `protectedFileCount`, `changedFileCount`, `exclusionCount`, `fatalErrorCount`, and `agent`. `agent` is additive and null unless an agent hook began the checkpoint; otherwise it holds `name`, `sessionId`, `turnId`, `transcriptPath`, `transcriptBytes` and `transcriptSha256` (the last two set at close). See `docs/AGENT-HOOKS.md`. Status values are `creating`, `open`, `closing`, `closed`, `invalid`, and `released`.
++A checkpoint summary includes `id`, nullable `label`, `source`, `status`, `manifestVersion`, millisecond timestamps, `policyFingerprint`, `closePolicyFingerprint`, `protectedFileCount`, `changedFileCount`, `exclusionCount`, `fatalErrorCount`, and `agent`. `closePolicyFingerprint` is additive: the policy fingerprint at close, null before close and for checkpoints closed by older builds. It differs from `policyFingerprint` when the ignore policy changed during the checkpoint, in which case close also returns a non-fatal `policy_changed` warning. `agent` is additive and null unless an agent hook began the checkpoint; otherwise it holds `name`, `sessionId`, `turnId`, `transcriptPath`, `transcriptBytes` and `transcriptSha256` (the last two set at close). See `docs/AGENT-HOOKS.md`. Status values are `creating`, `open`, `closing`, `closed`, `invalid`, and `released`.
+ 
+-File entries contain a relative `path`, `before` and nullable `after` states, and a nullable `change`. State objects contain `kind`, nullable `snapshotId`, nullable SHA-256 `hash`, and nullable POSIX `mode`. Kind values are `file` and `absent`; change values are `unchanged`, `modified`, `created`, and `deleted`.
++File entries contain a relative `path`, `before` and nullable `after` states, a nullable `change`, and an additive nullable `scope`. State objects contain `kind`, nullable `snapshotId`, nullable SHA-256 `hash`, and nullable POSIX `mode`. Kind values are `file` and `absent`; change values are `unchanged`, `modified`, `created`, and `deleted`. `scope` is null unless the ignore policy changed during the checkpoint: `left_scope` (protected at begin, excluded at close: before state kept, `after` null) or `entered_scope` (excluded at begin, protected at close: `before.kind` is `absent` because no before state was recorded). Both have a null `change`. Haven must not offer to restore them itself; dmc's restore and redo list them under `skipped` and never write them.
+ 
+ Operation summaries include `id`, `checkpointId`, `direction`, `status`, timestamps, and nullable `failureMessage`. Direction values are `restore` and `redo`. Status values are `planned`, `applying`, `completed`, `failed`, `rolling_back`, and `rolled_back`.
+ 
+@@ -78,7 +79,7 @@ recheck it, then execute without `--preview`. Execution re-runs the shared
+ preflight; preview is a point-in-time observation, not a reservation against
+ external writers. See [recovery preview details](RECOVERY-PREVIEW.md).
+ 
+-Restore actions contain `sequence`, relative `path`, expected state, and intended state. Conflicts and data errors contain `code`, `message`, and an optional relative `path`. Haven must decide whether a restore can be offered from `canApply`; it must not infer safety from an empty-looking action list alone.
++Restore actions contain `sequence`, relative `path`, expected state, and intended state. Conflicts and data errors contain `code`, `message`, and an optional relative `path`. The restore/redo plan also has an additive `skipped` list with the same shape (codes `left_scope` and `entered_scope`): files that are never written and do not block `canApply`. A redo whose `entered_scope` file changed since close reports it as a `workspace_drift` conflict instead. Haven must decide whether a restore can be offered from `canApply`; it must not infer safety from an empty-looking action list alone.
+ 
+ ## Required lifecycle
+ 
+diff --git a/website/src/content/docs/docs/dmc/checkpoints.md b/website/src/content/docs/docs/dmc/checkpoints.md
+index d5d3373e0f415328012176b7b2fb792787b38fa6..98ff9813eab8d7c9b42e9ed87cae6d4f23a1723b 100644
+--- a/website/src/content/docs/docs/dmc/checkpoints.md
++++ b/website/src/content/docs/docs/dmc/checkpoints.md
+@@ -35,9 +35,20 @@ dmc checkpoint diff <checkpoint-id>
+ ```
+ 
+ `diff` classifies each path as `modified`, `created`, or `deleted`. A rename
+-appears as one deletion plus one creation. Between begin and close, the policy
+-is re-checked: if ignore rules or config changed, the close is invalidated
+-instead of pretending the interval is intact.
++appears as one deletion plus one creation.
++
++Agents often edit `.gitignore`. If the ignore rules (any `.gitignore`,
++`.dmcignore`) or the config changed between begin and close, the close still
++succeeds with a `policy_changed` warning, and the new rules decide what is
++protected. Files whose protection changed are marked per file:
++
++- **left scope** — protected at begin, ignored at close. Its before-state is
++  kept, but restore and redo never touch it.
++- **entered scope** — ignored at begin, protected at close. It has no
++  before-state, so restore never deletes or overwrites it.
++
++The restore and redo previews list both under **Skipped**. Everything else,
++including the edited ignore files themselves, restores as usual.
+ 
+ ## Lifecycle
+ 
+@@ -47,7 +58,7 @@ instead of pretending the interval is intact.
+ | `open` | Work may proceed; the after-state is pending |
+ | `closing` | Close is verifying the after-state |
+ | `closed` | Verified before/after manifest; ready to restore or redo |
+-| `invalid` | Capture or policy verification failed; cannot restore |
++| `invalid` | Capture or verification failed; cannot restore |
+ | `released` | Retention pins detached after an explicit release |
+ 
+ Only `invalid`, `closed`, and `released` checkpoints allow a new begin.
+@@ -63,6 +74,19 @@ dmc checkpoint show <checkpoint-id>      # manifest + operation history
+ `show` includes the operation history, so an interrupted apply can be found
+ even after a restart.
+ 
++## Export a checkpoint
++
++```sh
++dmc checkpoint export <checkpoint-id> --to /tmp/at-checkpoint            # after state
++dmc checkpoint export <checkpoint-id> --to /tmp/before --state before
++```
++
++Export writes the project as it was at a checkpoint to a new or empty folder
++outside the project, verifying every file's SHA-256 and restoring its mode. It
++never touches the working copy, and a failed export leaves nothing behind.
++Only files dmc protects are exported: ignored dependencies such as
++`node_modules` or build output are not.
++
+ ## Retention
+ 
+ While a checkpoint may still be restored or redo'ed, its snapshots are pinned

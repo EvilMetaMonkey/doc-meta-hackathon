@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Mon, 26 Oct 2026 20:17:05 -0500
+Subject: [PATCH 08/31] Make hooks uninstall restore the original config bytes
+
+Uninstall now drops a "hooks" object it emptied, deletes a config file
+left empty (one dmc created), and writes in the original file's layout
+(single-line or its indent, and its final newline). Before, uninstalling
+from Muse Code's settings.json left "hooks": {} and a trailing newline,
+and a created .claude/settings.local.json was left as {"hooks": {}}.
+
+Muse Code scope notes now reflect the 1.4.13 probe: project hooks run
+only in a trusted workspace, so user settings stay the default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/src/hook_installer.dart   | 49 +++++++++++++++++++++++++++--------
+ test/hook_installer_test.dart | 29 ++++++++++++++++++++-
+ 2 files changed, 66 insertions(+), 12 deletions(-)
+
+diff --git a/lib/src/hook_installer.dart b/lib/src/hook_installer.dart
+index 1568d35602ccefe692246b9e671cfc83d4c15647..3e7e7a0e0be7fc894cbcb5babf3908cc7a1e5442 100644
+--- a/lib/src/hook_installer.dart
++++ b/lib/src/hook_installer.dart
+@@ -8,9 +8,10 @@ import 'agent_hooks.dart';
+ /// Where an agent's hook configuration is written.
+ enum HookScope { project, local, user }
+ 
+-/// The scope used when `--scope` is omitted. Claude Code's project-local
+-/// settings were verified by probe; for Muse Code only the user settings file
+-/// was verified (by a third-party spike). See docs/AGENT-HOOKS.md.
++/// The scope used when `--scope` is omitted. Both were verified by probe.
++/// Muse Code 1.4.13 also runs `.muse/hooks.json`, but only in a trusted
++/// workspace and silently skips it otherwise, so the user settings file,
++/// which always runs, is the default. See docs/AGENT-HOOKS.md.
+ HookScope defaultHookScope(HookAgent agent) => switch (agent) {
+   HookAgent.claudeCode => HookScope.local,
+   HookAgent.museCode => HookScope.user,
+@@ -170,8 +171,8 @@ HookConfigPlan planHookInstall(
+ }
+ 
+ /// Remove only handlers whose command exactly matches what dmc writes for
+-/// that event. Groups and event lists emptied by the removal are dropped;
+-/// everything else is left untouched.
++/// that event. Groups, event lists and a `hooks` object emptied by the
++/// removal are dropped; everything else is left untouched.
+ HookConfigPlan planHookUninstall(
+   Map<String, Object?> config,
+   HookAgent agent,
+@@ -204,6 +205,8 @@ HookConfigPlan planHookUninstall(
+     removed.add(event);
+     if (groups.isEmpty) hooks.remove(event);
+   }
++  // Install adds the "hooks" object when it is missing, so drop it again.
++  if (removed.isNotEmpty && hooks.isEmpty) after.remove('hooks');
+   return HookConfigPlan(after, const [], removed);
+ }
+ 
+@@ -249,8 +252,23 @@ List<String> otherDmcHookCommands(
+   ];
+ }
+ 
+-String encodeHookConfig(Map<String, Object?> config) =>
+-    '${const JsonEncoder.withIndent('  ').convert(config)}\n';
++/// Encode [config] in the layout of [original] (single-line or its indent,
++/// and whether it ends with a newline), so that uninstall restores a file
++/// written by dmc or by the agent to its exact bytes. A new file gets a
++/// two-space indent and a trailing newline.
++String encodeHookConfig(Map<String, Object?> config, {String original = ''}) {
++  final body = original.trimRight();
++  final String text;
++  if (body.isNotEmpty && !body.contains('\n')) {
++    text = jsonEncode(config);
++  } else {
++    final indent =
++        RegExp(r'^([ \t]+)"', multiLine: true).firstMatch(body)?.group(1) ??
++        '  ';
++    text = JsonEncoder.withIndent(indent).convert(config);
++  }
++  return original.isEmpty || original.endsWith('\n') ? '$text\n' : text;
++}
+ 
+ /// A line diff of [before] and [after], with `-`, `+` and ` ` prefixes.
+ List<String> lineDiff(String before, String after) {
+@@ -433,9 +451,13 @@ Future<int> runHooksCommand({
+   for (final event in plan.removed) {
+     print('- $event: ${dmcHookCommand(command, agent, event)}');
+   }
+-  final afterText = encodeHookConfig(plan.after);
++  // A config left empty by uninstall is one dmc created: remove the file.
++  final remove = action == 'uninstall' && plan.after.isEmpty;
++  final afterText = remove
++      ? ''
++      : encodeHookConfig(plan.after, original: beforeText);
+   print('--- $configPath');
+-  print('+++ $configPath');
++  print('+++ ${remove ? '/dev/null' : configPath}');
+   for (final line in lineDiff(beforeText, afterText)) {
+     print(line);
+   }
+@@ -443,6 +465,11 @@ Future<int> runHooksCommand({
+     print('[DMC] Preview only. Run again with --apply to write this change.');
+     return 0;
+   }
++  if (remove) {
++    file.deleteSync();
++    print('[DMC] Removed $configPath, which held only dmc hooks.');
++    return 0;
++  }
+   file.parent.createSync(recursive: true);
+   final temporary = File('$configPath.dmc-tmp');
+   temporary.writeAsStringSync(afterText, flush: true);
+@@ -453,9 +480,9 @@ Future<int> runHooksCommand({
+ 
+ List<String> _scopeNotes(HookAgent agent, HookScope scope) => [
+   if (agent == HookAgent.museCode && scope == HookScope.project)
+-    'Muse Code runs project hooks only after the folder is trusted. This path and its file shape are unverified; see docs/AGENT-HOOKS.md.',
++    'Muse Code runs project hooks only in a trusted workspace and silently skips them otherwise. Trust the folder in interactive muse, or pass --trust-workspace to muse exec.',
+   if (agent == HookAgent.museCode && scope == HookScope.user)
+-    'Verified by a third-party spike only, not on this machine; see docs/AGENT-HOOKS.md.',
++    'These hooks run in every Muse Code session; they do nothing outside a dmc workspace.',
+   if (agent == HookAgent.claudeCode && scope == HookScope.project)
+     '.claude/settings.json is usually committed, and the dmc path is specific to this machine. Prefer --scope local.',
+ ];
+diff --git a/test/hook_installer_test.dart b/test/hook_installer_test.dart
+index 7bea499b3227bce3d532ccedf85ea77decf2ff8a..f3647d7615a90a77d108a014c81745666583ff79 100644
+--- a/test/hook_installer_test.dart
++++ b/test/hook_installer_test.dart
+@@ -169,6 +169,7 @@ void main() {
+       ..createSync(recursive: true)
+       ..writeAsStringSync(jsonEncode(foreign));
+     expect((await hooks('install', 'claude-code', apply: true)).code, 0);
++    expect(claudeLocal().readAsStringSync(), isNot(contains('\n')));
+ 
+     final preview = await hooks('uninstall', 'claude-code');
+     expect(preview.code, 0);
+@@ -179,7 +180,7 @@ void main() {
+     expect(read(claudeLocal()), isNot(foreign));
+ 
+     expect((await hooks('uninstall', 'claude-code', apply: true)).code, 0);
+-    expect(read(claudeLocal()), foreign);
++    expect(claudeLocal().readAsStringSync(), jsonEncode(foreign));
+ 
+     final nothing = await hooks('uninstall', 'claude-code', apply: true);
+     expect(nothing.code, 0);
+@@ -191,6 +192,32 @@ void main() {
+     expect(status.output, contains('Stop: missing'));
+   });
+ 
++  test(
++    'uninstall restores exact bytes or removes a file dmc created',
++    () async {
++      // Muse Code writes settings with a two-space indent and no final newline.
++      const original =
++          '{\n  "schema_version": 1,\n  "provider": "meta",\n  "model": "m"\n}';
++      museUser()
++        ..createSync(recursive: true)
++        ..writeAsStringSync(original);
++      expect((await hooks('install', 'muse-code', apply: true)).code, 0);
++      expect(read(museUser()), contains('hooks'));
++      expect(museUser().readAsStringSync(), isNot(endsWith('\n')));
++      expect((await hooks('uninstall', 'muse-code', apply: true)).code, 0);
++      expect(museUser().readAsStringSync(), original);
++
++      expect((await hooks('install', 'claude-code', apply: true)).code, 0);
++      final preview = await hooks('uninstall', 'claude-code');
++      expect(preview.output, contains('+++ /dev/null'));
++      expect(claudeLocal().existsSync(), isTrue);
++      final removed = await hooks('uninstall', 'claude-code', apply: true);
++      expect(removed.code, 0);
++      expect(removed.output.last, contains('Removed'));
++      expect(claudeLocal().existsSync(), isFalse);
++    },
++  );
++
+   test('Muse Code defaults to user settings with an async Interrupt', () async {
+     final result = await hooks('install', 'muse-code', apply: true);
+     expect(result.code, 0, reason: result.output.join('\n'));

@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Mon, 26 Oct 2026 18:00:10 +0000
+Subject: [PATCH 02/31] Add STATUS.md and require agents to keep it current
+
+STATUS.md tracks what is done, in progress, broken and next, plus a
+session log. AGENTS.md and CLAUDE.md now tell every coding agent to
+read it at the start of a session, update it as work finishes or
+breaks, and always update it before the session ends.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MNGmjsBb5tfxhPVcEszkd1
+---
+ AGENTS.md | 26 +++++++++++++++++++++++++-
+ CLAUDE.md |  4 ++++
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 9d8b669cbfb91b9956b99d31c4fe41283977a98a..e27be3c6a26b4feacc12611cf5b664a4a6bb2376 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -1,5 +1,28 @@
+ # AGENTS.md
+ 
++## Session status (STATUS.md)
++[STATUS.md](STATUS.md) is the running record of this hackathon build. Every coding agent working in
++this repository, whatever the tool, must keep it current:
++
++- **At the start of a session**, read `STATUS.md` before doing anything else.
++- **During a session**, update it whenever a task finishes, something breaks or gets fixed, or the
++  plan changes. Do not wait until the end.
++- **At the end of every session**, update it before you stop, even if the session was short or
++  nothing worked.
++
++Each update must keep the four sections accurate:
++
++- **Done:** finished and verified work. Say how it was verified (tests, analyzer, manual check).
++- **In progress:** started but not finished, with enough detail for the next agent to pick it up.
++- **Broken:** known failures, failing tests and regressions, with the exact command or symptom.
++- **Next:** the ordered list of what to do next.
++
++Also update the `Last updated` line (date and agent) and add one line to the session log, newest
++first. Keep it factual: never mark anything done that was not verified, and never drop a broken
++item without saying how it was fixed. Commit `STATUS.md` with the work it describes.
++
++---
++
+ ## Project Summary
+ dmc is a Dart CLI for local shadow-history version control designed for AI-assisted coding workflows. It watches project files, debounces rapid changes, stores snapshot metadata plus hashed backups in a hidden repo-local `.dmc/` SQLite vault, restores prior file states quickly, and can diff a working file against historical snapshots.
+ 
+@@ -213,13 +236,14 @@ These rules are critical because dmc is a recovery tool.
+ 
+ ## Implementation Workflow for Agents
+ Before making changes:
+-1. Inspect the relevant files first.
++1. Read `STATUS.md`, then inspect the relevant files.
+ 2. Briefly explain the implementation plan.
+ 3. List the files you intend to modify.
+ 4. Make the smallest clean change that fits the existing architecture.
+ 5. Do not rewrite unrelated code.
+ 6. Add or update tests.
+ 7. Summarize what changed and note any follow-up work.
++8. Update `STATUS.md` (see Session status above).
+ 
+ When implementing a feature:
+ - preserve current behavior unless the task explicitly changes it
+diff --git a/CLAUDE.md b/CLAUDE.md
+index d0bec889d42685af0e7e3357a4b27a929894148e..ae68a809b4866124749e977d17f8d5b9c30e254f 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -10,6 +10,10 @@ the original single-table prototype; that description is obsolete.
+ pre-existing dmc work; everything after it is hackathon work and must stay that way
+ (never rewrite or squash history before the tag).
+ 
++**Keep [STATUS.md](STATUS.md) current.** Read it at the start of every session, update
++it whenever a task finishes or something breaks, and always update it before the
++session ends. The rules are in AGENTS.md under "Session status".
++
+ Quick reference (details in AGENTS.md):
+ 
+ ```bash

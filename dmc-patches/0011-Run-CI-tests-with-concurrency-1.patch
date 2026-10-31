@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Tue, 27 Oct 2026 01:41:56 -0500
+Subject: [PATCH 11/31] Run CI tests with --concurrency=1
+
+Five older test files set the process-wide Directory.current across async
+gaps, which races when plain dart test runs files in parallel isolates of
+one process (seen on PR #2 on macOS Intel and Windows). The documented
+gate is dart test --concurrency=1; CI now runs the same command.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .github/workflows/ci.yml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index b8efd9d725beff270fc98561c5789706fa7ad3fb..684f54c3a16ab602ba9cbd064addcff21449f3dd 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -20,7 +20,7 @@ jobs:
+           sdk: '3.11.5'
+       - run: dart pub get --enforce-lockfile
+       - run: dart run tool/check_analyzer.dart
+-      - run: dart test
++      - run: dart test --concurrency=1
+       - run: dart test tool/haven_contract_test.dart --concurrency=1
+       - run: dart build cli -o build/ci-dmc
+       - if: runner.os != 'Windows'

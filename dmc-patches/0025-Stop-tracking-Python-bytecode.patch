@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Wed, 28 Oct 2026 02:13:24 -0500
+Subject: [PATCH 25/31] Stop tracking Python bytecode
+
+deploy/modal/__pycache__/ was committed by accident; ignore __pycache__/
+and *.pyc.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .gitignore | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/.gitignore b/.gitignore
+index d980ccb1f733cd9b870b10ba396dbda4d61cbbf5..e19b212a503b11a196f5c6cb0030602c9ab764bf 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -14,3 +14,7 @@ doc/api/
+ # DMC Secret Vault Database & Snapshots
+ # (never commit local .dmc history — it's user-specific runtime data)
+ .dmc/
++
++# Python bytecode (deploy/modal)
++__pycache__/
++*.pyc

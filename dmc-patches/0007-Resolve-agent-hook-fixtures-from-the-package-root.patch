@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Mon, 26 Oct 2026 18:43:41 -0500
+Subject: [PATCH 07/31] Resolve agent hook fixtures from the package root
+
+dart test runs test files in parallel isolates of one process, and other
+test files change Directory.current, so a relative fixture path failed
+intermittently in CI (PathNotFoundException on stop_failure.json).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ test/agent_hooks_test.dart | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/test/agent_hooks_test.dart b/test/agent_hooks_test.dart
+index e9bf5b880636a3c304777de1cd6005cb72182310..6edece4741a1d713a7647da71cc02ae91c448280 100644
+--- a/test/agent_hooks_test.dart
++++ b/test/agent_hooks_test.dart
+@@ -1,6 +1,7 @@
+ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
++import 'dart:isolate';
+ 
+ import 'package:crypto/crypto.dart';
+ import 'package:dmc/dmc.dart';
+@@ -11,6 +12,17 @@ import 'package:test/test.dart';
+ const museSession = '22222222-3333-4444-8555-666666666666';
+ const claudeSession = '11111111-2222-4333-8444-555555555555';
+ 
++/// The package root, resolved from `package:dmc` rather than the process cwd:
++/// `dart test` runs files in parallel isolates of one process, and other test
++/// files change `Directory.current`.
++final String packageRoot = p.dirname(
++  p.dirname(
++    Isolate.resolvePackageUriSync(
++      Uri.parse('package:dmc/dmc.dart'),
++    )!.toFilePath(),
++  ),
++);
++
+ /// A fixture payload with `cwd` (and optionally other fields) replaced.
+ String fixture(
+   String agentDirectory,
+@@ -19,7 +31,14 @@ String fixture(
+   Map<String, Object?> overrides = const {},
+ }) {
+   final file = File(
+-    p.join('test', 'fixtures', 'agent_hooks', agentDirectory, '$name.json'),
++    p.join(
++      packageRoot,
++      'test',
++      'fixtures',
++      'agent_hooks',
++      agentDirectory,
++      '$name.json',
++    ),
+   );
+   final payload = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+   return jsonEncode({...payload, 'cwd': cwd, ...overrides});

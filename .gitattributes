@@ -1,0 +1,2 @@
+# The dmc patch series must keep its exact bytes for git am.
+dmc-patches/*.patch -text

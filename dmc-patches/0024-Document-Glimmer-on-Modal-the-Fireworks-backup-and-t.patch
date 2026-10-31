@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Wed, 28 Oct 2026 01:45:25 -0500
+Subject: [PATCH 24/31] Document Glimmer on Modal, the Fireworks backup and the
+ lesson library
+
+doc/README.md covers the modal and fireworks providers, the fallback
+chain, the lesson file format with a real example, the matching rule,
+doc start and the verified Muse Code first prompt. docs/AGENT-HOOKS.md
+records Muse's interactive initial prompt (muse "<prompt>", 1.4.14).
+HACKATHON.md's model table, AGENTS.md, CHANGELOG and STATUS.md are
+updated; STATUS records the undeployed Modal app and the Fireworks key
+to rotate.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md    | 18 +++++++++++++++---
+ CHANGELOG.md |  3 +++
+ 2 files changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 665a9453a02bacc1815ea1714bc7727061b225d5..6954714a842b5996393688b1e3a6147d2b024e6f 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -102,8 +102,19 @@ The most important product qualities are:
+   running the dmc executable with `--json --schema-version 1` (found via `--dmc`, `DMC_BIN`, then
+   `PATH`, and checked with `capabilities`, skipping Apple's `/usr/bin/dmc`). It never reads
+   `.dmc/`, imports dmc's Dart code, or writes workspace files; it writes only `config.json` and
+-  `usage.json` in its user config directory. Secrets are redacted before any hosted call. See
+-  `doc/README.md`.
++  `usage.json` in its user config directory, and lessons in its user data directory (keyed by
++  dmc's workspace fingerprint). Secrets are redacted before any hosted call.
++- **Doc providers:** `meta` (Muse Spark 1.3, Muse Wonder), `baseten` (Muse Spark Open), `fireworks`
++  (Muse Spark Open backup), `modal` (Mike's private Muse Glimmer deployment in `deploy/modal/`;
++  base URL from the config or `DOC_MODAL_BASE_URL`, never committed) and `local` (this Mac).
++  Roles: `summary` modal → baseten, `workhorse` baseten → fireworks, `restore` meta → baseten;
++  every fallback is logged and there is no second hop. `--local` means this Mac only and refuses
++  Modal. Keys only from env vars (`MODEL_API_KEY`, `BASETEN_API_KEY`, `FIREWORKS_API_KEY`,
++  `MODAL_GLIMMER_KEY`). See `doc/README.md`.
++- **Lessons are Doc-only.** dmc never sees them. Matching is a fixed file-overlap rule; models only
++  draft lessons (workhorse) and condense briefs (summary). Nothing enters the library without
++  `doc lesson approve`, and a brief reaches an agent only after the user agrees (`--yes` is for
++  scripted demos).
+ 
+ ---
+ 
+@@ -279,7 +290,8 @@ Use `docs/TESTER-READINESS-AUDIT.md` as the original audit and the Phase 2/3 han
+ ## Common Commands
+ - Doc (from `doc/`): `dart run bin/doc.dart models [--check] [--available]`,
+   `dart run bin/doc.dart summarize <checkpoint-id> [--local] [--show-prompt] [--role-provider summary=baseten]`,
+-  `dart run bin/doc.dart usage`. Its gate: `dart pub get --enforce-lockfile`,
++  `dart run bin/doc.dart usage`, `dart run bin/doc.dart lesson draft|edit|approve|reject|show|brief`,
++  `dart run bin/doc.dart lessons [path]`, `dart run bin/doc.dart start <muse-code|claude-code> "<task>"`. Its gate: `dart pub get --enforce-lockfile`,
+   `dart analyze --fatal-infos`, `DMC_TEST_BIN=../build/dmc/bundle/bin/dmc dart test --concurrency=1`.
+ - `dart run bin/dmc.dart init`
+ - `dart run bin/dmc.dart watch`
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0ee7d2b1e48aeb1b58bfba86ed645fda40b14d25..85a38e6f1b1648f5bbc3594da0bb40ca595a22f4 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,8 @@
+ ## Unreleased — Meta AI Developer Hackathon 2026
+ 
++- Add Doc's lesson library (part 1). Lessons are markdown with YAML front matter in Doc's data dir, keyed by dmc's workspace fingerprint (never in the repo or `.dmc/`). New commands: `doc lesson draft <checkpoint-id>` (workhorse role; files from the checkpoint, never the model; redacted), `doc lesson edit|approve|reject|show`, `doc lessons [--files]`, `doc lessons path`, `doc lesson brief --task` (a fixed file-overlap match, then a brief of at most 100 words from the summary role), and `doc start <muse-code|claude-code> "<task>"` (asks before adding the brief to the agent's first prompt; `--yes` for scripted demos). dmc is unchanged and model-free.
++- Add Doc providers `modal` (a private Muse Glimmer 30B deployment; `deploy/modal/` serves Meta's official weights with vLLM 0.28.0 on one L40S, not yet deployed) and `fireworks` (Muse Spark Open backup). `summary` now uses Modal with a logged fallback to Baseten, and `workhorse` falls back from Baseten to Fireworks. Provider request styles (reasoning effort, token-limit field, sampling, Glimmer's reasoning strength) are configuration, and reasoning text is stripped from answers.
++- Fix a Windows flake in the watcher rename test: retry the delete of a file the watcher may still hold open (test only).
+ - Keep agent hooks inside their own Git work tree. `muse -w` creates linked worktrees inside the repository (`<repo>/.muse/worktrees/<date>-<hex>`), so a hook there used to record the turn in the main work tree's vault. `dmc agent-hook` now records nothing, and warns on stderr, when the nearest `.git` marker above its cwd is below the `.dmc` root (a linked worktree, a nested repository or a submodule). It checks marker positions only, with no git process. Each worktree has its own vault and checkpoints after `dmc init` there. `status` and `doctor` show whether the workspace is a linked worktree, its main work tree, and which linked worktrees have a vault.
+ - Add Doc, a separate companion program in `doc/` (package `dmc_doc`). It talks to dmc only through `--json --schema-version 1`. It has one OpenAI-compatible client for Meta (`api.meta.ai`), Baseten (Muse Spark Open) and a local server (Muse Glimmer), with retries, timeouts, one logged fallback, per-provider budgets and usage tracking, and a tested secret-redaction module. Commands: `doc models [--check] [--available]`, `doc summarize <checkpoint-id> [--local] [--show-prompt]` and `doc usage`. CI analyzes and tests `doc/`.
+ - Add `dmc agent-hook <muse-code|claude-code> <event>`: a UserPromptSubmit hook begins a checkpoint labelled with the prompt's first line, and Stop, StopFailure, SessionEnd (and Muse Code Interrupt) close it, but only when the same agent and session own it. A missed Stop is closed by the next prompt; a foreign active checkpoint is left alone with a stderr warning. The command always exits 0, prints nothing on stdout, retries a busy workspace lock for up to 5 seconds, and falls back to the session environment when stdin is empty or invalid.

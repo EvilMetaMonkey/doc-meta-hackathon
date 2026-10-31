@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Wed, 28 Oct 2026 02:23:23 -0500
+Subject: [PATCH 27/31] Document doc restore, --last-restore and abandoned-work
+ diffs
+
+doc/README.md gains a Restore section with a real run, how
+--last-restore finds a restore through schema 1, what the drafting
+prompt sees (the exported diff, redacted; truncated labels marked), and
+that --yes is for scripted demos. AGENTS.md, CHANGELOG and STATUS.md
+are updated; Next is time-travel bisect.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md    | 8 +++++++-
+ CHANGELOG.md | 5 +++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index e3e405318517eab92032275cf8828c3ae891ebb9..d73d0d3d464c7cf584611b48bb282308f2f71e89 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -112,6 +112,10 @@ The most important product qualities are:
+   every fallback is logged and there is no second hop. `--local` means this Mac only and refuses
+   Modal. Keys only from env vars (`MODEL_API_KEY`, `BASETEN_API_KEY`, `FIREWORKS_API_KEY`,
+   `MODAL_GLIMMER_KEY`). See `doc/README.md`.
++- **`doc restore` only drives dmc.** It previews with `dmc checkpoint restore <id> --json`, applies
++  with `--apply` after the user agrees, never forces a conflict or recovery, then offers a lesson.
++  To show the model the undone work, Doc exports the checkpoint's states with
++  `dmc checkpoint export` into a temporary directory outside the workspace and diffs them there.
+ - **Lessons are Doc-only.** dmc never sees them. Matching is a fixed file-overlap rule; models only
+   draft lessons (workhorse) and condense briefs (summary). Nothing enters the library without
+   `doc lesson approve`, and a brief reaches an agent only after the user agrees (`--yes` is for
+@@ -292,7 +296,9 @@ Use `docs/TESTER-READINESS-AUDIT.md` as the original audit and the Phase 2/3 han
+ - Doc (from `doc/`): `dart run bin/doc.dart models [--check] [--available]`,
+   `dart run bin/doc.dart summarize <checkpoint-id> [--local] [--show-prompt] [--role-provider summary=baseten]`,
+   `dart run bin/doc.dart usage`, `dart run bin/doc.dart lesson draft|edit|approve|reject|show|brief`,
+-  `dart run bin/doc.dart lessons [path]`, `dart run bin/doc.dart start <muse-code|claude-code> "<task>"`. Its gate: `dart pub get --enforce-lockfile`,
++  `dart run bin/doc.dart lessons [path]`, `dart run bin/doc.dart start <muse-code|claude-code> "<task>"`,
++  `dart run bin/doc.dart restore <checkpoint-id> [--yes] [--no-lesson]`,
++  `dart run bin/doc.dart lesson draft --last-restore`. Its gate: `dart pub get --enforce-lockfile`,
+   `dart analyze --fatal-infos`, `DMC_TEST_BIN=../build/dmc/bundle/bin/dmc dart test --concurrency=1`.
+ - `dart run bin/dmc.dart init`
+ - `dart run bin/dmc.dart watch`
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 85a38e6f1b1648f5bbc3594da0bb40ca595a22f4..02cf77d3f76c0ca53b9abf6abb09575e6ad1e86f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,10 @@
+ ## Unreleased — Meta AI Developer Hackathon 2026
+ 
++- Add `doc restore <checkpoint-id> [--yes] [--no-lesson]` (rollback without amnesia). It previews dmc's checkpoint restore in plain terms, asks, applies it through dmc's journaled restore, and never forces a conflict or interrupted restore. It then offers to draft a lesson from the undone work and asks, optionally, what went wrong. `--yes` is for scripted demos only.
++- Add `doc lesson draft --last-restore`: it drafts from the most recent applied restore, found through dmc's existing schema 1 JSON (`checkpoint list` operations), skipping a restore that a later redo reapplied. No dmc change.
++- Lesson drafts now include the abandoned work as a redacted line diff, built from `dmc checkpoint export` of the before and after states in a temporary directory outside the workspace. A label dmc truncated is marked as truncated, and the model is told never to quote or complete it.
++- `summary` now defaults to Baseten Muse Spark Open with a logged Fireworks fallback. Muse Glimmer on Modal is an opt-in one-line config change while the deployment is on hold.
++- Stop tracking Python bytecode (`deploy/modal/__pycache__/`), and stop naming the Modal workspace in the docs.
+ - Add Doc's lesson library (part 1). Lessons are markdown with YAML front matter in Doc's data dir, keyed by dmc's workspace fingerprint (never in the repo or `.dmc/`). New commands: `doc lesson draft <checkpoint-id>` (workhorse role; files from the checkpoint, never the model; redacted), `doc lesson edit|approve|reject|show`, `doc lessons [--files]`, `doc lessons path`, `doc lesson brief --task` (a fixed file-overlap match, then a brief of at most 100 words from the summary role), and `doc start <muse-code|claude-code> "<task>"` (asks before adding the brief to the agent's first prompt; `--yes` for scripted demos). dmc is unchanged and model-free.
+ - Add Doc providers `modal` (a private Muse Glimmer 30B deployment; `deploy/modal/` serves Meta's official weights with vLLM 0.28.0 on one L40S, not yet deployed) and `fireworks` (Muse Spark Open backup). `summary` now uses Modal with a logged fallback to Baseten, and `workhorse` falls back from Baseten to Fireworks. Provider request styles (reasoning effort, token-limit field, sampling, Glimmer's reasoning strength) are configuration, and reasoning text is stripped from answers.
+ - Fix a Windows flake in the watcher rename test: retry the delete of a file the watcher may still hold open (test only).
