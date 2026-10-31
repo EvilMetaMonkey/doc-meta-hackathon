@@ -491,7 +491,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     costText = '≤ \$${single.toStringAsFixed(2)}';
     say(
       'Estimate: at most \$${single.toStringAsFixed(2)} on $model (${agentModel != null && agentModel.isNotEmpty ? '--agent-model' : 'Muse Code\'s configured model'}): $perStep. '
-      'Muse Code bills its own Meta account; Doc reads the real tokens afterwards. Use --agent-model muse-spark-1.3-contributor for the cheapest run.',
+      'Muse Code bills its own Meta account; Doc reads the real tokens afterwards.${model == 'muse-spark-1.3-contributor' ? '' : ' Use --agent-model muse-spark-1.3-contributor for the cheapest run.'}',
     );
   } else {
     costText =

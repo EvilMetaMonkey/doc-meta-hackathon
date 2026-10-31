@@ -1144,7 +1144,7 @@ List<String> timelineJudgmentLines(TimelineRun run, TimelineJudgment judgment) {
       ],
       '     ${judgment.ranking[i].rationale}',
       if (judgment.ranking[i].risks.isNotEmpty)
-        '     Risks: ${judgment.ranking[i].risks.join('; ')}',
+        '     Risks: ${judgment.ranking[i].risks.map((r) => r.replaceFirst(RegExp(r'[.;]+$'), '')).join('; ')}',
     ],
   ];
 }
