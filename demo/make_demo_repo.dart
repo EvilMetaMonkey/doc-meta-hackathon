@@ -2,12 +2,14 @@
 // (money helpers and a checkout) with unittest tests, as a Git repository
 // with a dmc vault, and (after asking) both agents' dmc hooks.
 //
-//   dart run demo/make_demo_repo.dart <folder> [--dmc <path>] [--yes]
+//   dart run demo/make_demo_repo.dart <folder> [--dmc <path>] [--yes] [--force]
 //
-// <folder> must not exist or be empty. dmc is found with --dmc, then
-// DMC_BIN, then this repository's .deps/dmc build (dart run
-// tool/setup_dmc.dart). --yes installs the hooks without asking (for
-// scripted runs). Uses only dart:io, so it runs on macOS, Linux and Windows.
+// <folder> must not exist or be empty, and must not be inside another Git
+// work tree (unless --force). dmc is found with --dmc, then DMC_BIN, then
+// this repository's .deps/dmc build (dart run tool/setup_dmc.dart). The hook
+// question defaults to No when stdin is not a terminal; --yes installs the
+// hooks without asking (for scripted runs). Uses only dart:io, so it runs
+// on macOS, Linux and Windows.
 
 import 'dart:io';
 
@@ -21,7 +23,8 @@ Run the tests with:
 
     python3 -m unittest -q
 ''',
-  'money.py': '''"""Money helpers. Amounts are dollars, rounded to whole cents."""
+  'money.py':
+      '''"""Money helpers. Amounts are dollars, rounded to whole cents."""
 
 
 def round_money(amount):
@@ -119,24 +122,77 @@ Future<ProcessResult> run(
   return result;
 }
 
+const String usage = '''
+Usage: dart run demo/make_demo_repo.dart <folder> [--dmc <path>] [--yes] [--force]
+
+Creates the demo repository for demo/RUNBOOK.md: a small Python shop with
+unittest tests, git init, dmc init, and (after asking) both agents' dmc hooks.
+
+  <folder>      A new or empty folder, not inside another Git work tree.
+  --dmc <path>  The dmc executable (default: DMC_BIN, then .deps/dmc's build).
+  --yes         Install the hooks without asking (scripted runs).
+  --force       Allow a folder inside another Git work tree.
+  -h, --help    Show this help.''';
+
+/// The Git work tree that contains [directory] (its nearest existing
+/// ancestor), or null.
+String? enclosingWorkTree(Directory directory) {
+  var current = directory.absolute;
+  while (!current.existsSync()) {
+    final parent = current.parent;
+    if (parent.path == current.path) return null;
+    current = parent;
+  }
+  final result = Process.runSync('git', [
+    '-C',
+    current.path,
+    'rev-parse',
+    '--show-toplevel',
+  ]);
+  final top = '${result.stdout}'.trim();
+  return result.exitCode == 0 && top.isNotEmpty ? top : null;
+}
+
 Future<void> main(List<String> arguments) async {
   final args = [...arguments];
+  if (args.contains('--help') || args.contains('-h')) {
+    stdout.writeln(usage);
+    exit(0);
+  }
   final yes = args.remove('--yes');
+  final force = args.remove('--force');
   String? dmc;
   final at = args.indexOf('--dmc');
-  if (at >= 0 && at + 1 < args.length) {
+  if (at >= 0) {
+    if (at + 1 >= args.length) {
+      stderr.writeln('make_demo_repo: --dmc needs a path.\n\n$usage');
+      exit(2);
+    }
     dmc = args[at + 1];
     args.removeRange(at, at + 2);
   }
-  if (args.length != 1) {
+  final unknown = args.where((a) => a.startsWith('-')).toList();
+  if (unknown.isNotEmpty) {
     stderr.writeln(
-      'Usage: dart run demo/make_demo_repo.dart <folder> [--dmc <path>] [--yes]',
+      'make_demo_repo: unknown option ${unknown.first}.\n\n$usage',
     );
+    exit(2);
+  }
+  if (args.length != 1) {
+    stderr.writeln(usage);
     exit(2);
   }
   final folder = Directory(args.single).absolute;
   if (folder.existsSync() && folder.listSync().isNotEmpty) {
     stderr.writeln('make_demo_repo: ${folder.path} exists and is not empty.');
+    exit(1);
+  }
+  final enclosing = enclosingWorkTree(folder);
+  if (enclosing != null && !force) {
+    stderr.writeln(
+      'make_demo_repo: ${folder.path} is inside the Git work tree $enclosing. '
+      'Pick a folder outside it (for example /tmp/doc-demo), or pass --force.',
+    );
     exit(1);
   }
   dmc ??= Platform.environment['DMC_BIN'];
@@ -167,17 +223,29 @@ Future<void> main(List<String> arguments) async {
   await run('git', ['add', '-A'], cwd);
   // The user's own identity when set, else a demo one for this repo only.
   final named =
-      (await Process.run('git', ['config', 'user.name'], workingDirectory: cwd))
-          .exitCode ==
+      (await Process.run('git', [
+        'config',
+        'user.name',
+      ], workingDirectory: cwd)).exitCode ==
       0;
   await run('git', [
-    if (!named) ...['-c', 'user.name=Demo', '-c', 'user.email=demo@example.com'],
+    if (!named) ...[
+      '-c',
+      'user.name=Demo',
+      '-c',
+      'user.email=demo@example.com',
+    ],
     'commit',
     '--quiet',
     '-m',
     'Tiny shop: money helpers, checkout and tests',
   ], cwd);
-  final tests = await run('python3', ['-m', 'unittest', '-q'], cwd, check: false);
+  final tests = await run(
+    'python3',
+    ['-m', 'unittest', '-q'],
+    cwd,
+    check: false,
+  );
   stdout.writeln(
     tests.exitCode == 0
         ? 'Tests pass (python3 -m unittest -q).'
@@ -194,15 +262,32 @@ Future<void> main(List<String> arguments) async {
   var install = yes;
   if (yes) {
     stdout.writeln('yes (--yes)');
+  } else if (!stdin.hasTerminal) {
+    // Scripts and pipes get the safe default.
+    stdout.writeln('no (stdin is not a terminal; pass --yes to install)');
   } else {
     final answer = (stdin.readLineSync() ?? '').trim().toLowerCase();
     install = answer == 'y' || answer == 'yes';
   }
   if (install) {
-    await run(dmc, ['hooks', 'install', '--agent', 'claude-code', '--apply'], cwd);
-    await run(dmc, ['hooks', 'install', '--agent', 'muse-code', '--apply'], cwd);
+    await run(dmc, [
+      'hooks',
+      'install',
+      '--agent',
+      'claude-code',
+      '--apply',
+    ], cwd);
+    await run(dmc, [
+      'hooks',
+      'install',
+      '--agent',
+      'muse-code',
+      '--apply',
+    ], cwd);
   } else {
-    stdout.writeln('Hooks not installed. Without them, agent turns are not checkpointed.');
+    stdout.writeln(
+      'Hooks not installed. Without them, agent turns are not checkpointed.',
+    );
   }
 
   stdout.writeln('''
