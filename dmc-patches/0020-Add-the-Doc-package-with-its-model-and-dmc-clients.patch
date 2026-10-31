@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 15:37:35 -0500
-Subject: [PATCH 20/31] Add the Doc package with its model and dmc clients
+Subject: [PATCH] Add the Doc package with its model and dmc clients
 
 doc/ is a separate Dart package (dmc_doc, executable doc). dmc itself
 stays free of models; the root analyzer excludes doc/.

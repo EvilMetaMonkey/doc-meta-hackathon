@@ -3,7 +3,7 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-10-31 by Claude (timelines part 2 and demo session)
+Last updated: 2026-10-31 by Claude (polish session)
 
 **Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
 work only. dmc lives in its own repository and is set up in `.deps/dmc` by
@@ -15,6 +15,51 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 ## Done
 
+- **Polish session** (branch `polish`).
+  - **Cowork's review fixes:**
+    - `make_demo_repo.dart`: `--help`/`-h`; unknown options are errors; a non-empty target, or
+      one inside another Git work tree, is refused (unless `--force`); the hook question
+      defaults to No without a terminal. 5 tests, run with a throwaway HOME.
+    - Wonder's judgment checks plan adherence: `followed_plan` (yes/partly/no) and
+      `actual_change` (≤25 words) per timeline, validated strictly. The ranking shows
+      "Planned: … / Did: …" and flags "DIDN'T FOLLOW ITS PLAN". The comparison (printed after
+      judging) shows "did (per Wonder)". Scores are never changed by Doc.
+  - **dmc parity** (patches 0032–0035, made in `.deps/dmc` and exported):
+    - `dmc disable [--apply] [--json]` removes only dmc's own hooks from every supported config
+      file (any dmc build), through the exact-match uninstall with byte-exact restore, and
+      stops the watcher; `.dmc/` and every checkpoint stay;
+    - `dmc doctor` hook checks: a missing or non-executable dmc, a different dmc build, a
+      non-async Muse Interrupt, and an agent checkpoint open past `--stale-hours` (default 2)
+      by an ended session, each with its fix, changing nothing;
+    - `dmc hooks status --json`;
+    - 11 new dmc tests (234 in all).
+    - `tool/export_patches.dart` now writes unnumbered subjects (0001–0031 changed only in that
+      line), and a clean `tool/setup_dmc.dart` applies 35 of 35 (0035 fixes 0033 on Windows, found by CI).
+  - **`doc doctor [--check]`:** dmc, workspace, hooks (via dmc JSON), keys (never values) and
+    roles, Modal, microphone, Muse Code's agent model with the estimate, and Claude Code; each
+    line ok/warn/FAIL with its fix. `--check` sends one tiny prompt per provider and warms
+    Glimmer. 4 tests. Doc's dmc client passes the home-related variables to dmc.
+  - **The runbook:** `doc doctor` first, `doc doctor --check` as the warm-up, the video's agents
+    on Muse Code's configured Wonder (about $0.80 per run), Planned / Did, the voice-restore
+    variant before applying, a 30-second "if something goes wrong" section, and `dmc disable`
+    for cleanup.
+  - **Real checks on the Mac, 2026-10-31** (fresh `/tmp` demo repo, both hooks):
+    - `doc doctor`: 11 ok in under 1 s. `doc doctor --check`: 15 ok in 96 s, with Glimmer cold
+      (90.9 s).
+    - `dmc disable`: the preview listed 9 hook entries and the running watcher. `--apply`
+      restored Muse's `settings.json` to its exact pre-install SHA-256, removed the Claude file,
+      stopped the watcher and kept the checkpoint; a second `--apply` did nothing; `dmc hooks
+      install` for both agents restored recording.
+    - Timelines with `--agent-model muse-spark-1.3-contributor` after four real turns and
+      bisect, 66 s:
+      - timeline 2 passed and was recommended (Planned / Did matched);
+      - timeline 1 fixed only the caller, and its tests failed;
+      - timeline 3's agent hit a Meta `server_error` and changed nothing, which Wonder flagged
+        as "DIDN'T FOLLOW ITS PLAN".
+    - Cost: Muse Code $0.012, Wonder $0.046 (planner and judge), plus the two Muse demo turns on
+      Wonder (not metered), the `--check` calls (about $0.003) and Modal GPU time.
+  - **Gates:** a clean `setup_dmc` (35/35); dmc analyzer clean, 234 tests, 3 contract tests;
+    Doc analyzer clean, 187 tests.
 - **Timelines part 2: Wonder judges** (branch `timelines-2`).
   - After a run (unless `--no-judge`), and as `doc timelines judge <run-id>`, the `judge` role
     (Muse Wonder) gets the task, the base label and, per timeline, the approach, the redacted
@@ -587,7 +632,12 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 ## In progress
 
-- Nothing yet.
+- PR #2 (`polish`) CI: on `7b41f91`, ubuntu, macos-latest and macos-15-intel passed in both the
+  push and pull_request runs; windows-latest failed 3 `hook_doctor` tests (no execute bit on
+  Windows). Patch 0035 fixes it, and locally a clean `setup_dmc` applied 35/35, dmc ran 234 tests
+  and 3 contract tests and Doc 187. Pushing it was refused (HTTP 403, "You must verify your email
+  address" on the GitHub account), so CI has not run on the fix yet. Next: verify the email at
+  https://github.com/settings/emails, push `polish` and wait for CI on all four platforms.
 
 ## Broken
 
@@ -632,6 +682,11 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
   commit; the patch option moves only the timeline's change. Timelines need the dmc workspace to
   be the Git top level. The timelines CLI tests run on Windows CI, but Muse Code on Windows
   is not verified.
+- `dmc disable` removes user-scope hooks too, which serve every dmc workspace on the machine (the
+  preview says so). Re-enable with `dmc hooks install`. The doctor's "session looks ended" check
+  is a heuristic: the transcript has been idle for the stale age, or none was found.
+- Contributor-mode Spark agents are cheap but weaker: in the rehearsal one hit a Meta
+  `server_error`, and Doc reported it as a failed timeline.
 - **Voice, not yet verified with a person:** no live `doc talk` with the microphone was run (this
   session had no interactive terminal and nobody spoke), so the macOS microphone permission
   prompt, the raw-mode key handling and the live partial line are tested with fakes only. The
@@ -660,13 +715,9 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
-1. Demo polish: record the video from demo/RUNBOOK.md (Mike), with a live `doc talk` at the
-   microphone (first-run permission prompt, Space/Enter, Esc; ideally `brew install sox`).
-2. Parity items in dmc (through `.deps/dmc` and `tool/export_patches.dart`):
-   - a clean `dmc disable`;
-   - `dmc doctor` detecting broken or stale agent hooks (a hook pointing at a dmc that no longer
-     exists, or at an old build).
-3. Submit (Nov 4).
+1. Final README, narration and submission text (Cowork drafts).
+2. Recording the video from demo/RUNBOOK.md (Mike), with a live `doc talk` at the microphone.
+3. Submit by Nov 4, 9:00 PM ET.
 
 - Mike: once happy with this repository, make `EvilMetaMonkey/dmc-meta-hackathon` private (or
   archive it with a README pointing here). Name dmc and its setup (`tool/setup_dmc.dart`) in the
@@ -681,6 +732,12 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 ## Session log
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
+
+- 2026-10-31 · Claude · Polish (branch `polish`): `make_demo_repo` safety and `--help`, plan
+  adherence in Wonder's judgment (Planned / Did), `dmc disable` and the `dmc doctor` hook checks
+  (patches 0032–0034), `doc doctor`, and the runbook polish. Verified with 234 dmc and 187 Doc
+  tests, a clean setup, both doctor runs, a disable / reinstall run and a cheap real timelines
+  run. Left open: the submission text and the recording.
 
 - 2026-10-31 · Claude · Timelines part 2 and demo (branch `timelines-2`): Wonder judging with
   validated JSON, `--from-bisect`, the voice timelines route, the model-aware estimate and

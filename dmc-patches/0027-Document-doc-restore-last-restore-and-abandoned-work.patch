@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Wed, 28 Oct 2026 02:23:23 -0500
-Subject: [PATCH 27/31] Document doc restore, --last-restore and abandoned-work
- diffs
+Subject: [PATCH] Document doc restore, --last-restore and abandoned-work diffs
 
 doc/README.md gains a Restore section with a real run, how
 --last-restore finds a restore through schema 1, what the drafting

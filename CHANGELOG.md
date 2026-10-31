@@ -3,6 +3,33 @@
 Event work only (Meta AI Developer Hackathon 2026, from 2026-10-26). Changes to dmc are listed
 by patch in [PATCHES.md](PATCHES.md).
 
+## 2026-10-31: polish, parity and doc doctor
+
+- **Wonder checks plan adherence.** Each judged timeline gets `followed_plan` (yes / partly /
+  no) and `actual_change` (at most 25 words: what its diff really does).
+  - The ranking shows "Planned: … / Did: …" and flags "didn't follow its plan".
+  - The comparison, now printed after judging, shows "did (per Wonder)".
+  - Scores are Wonder's own.
+- **`doc doctor [--check]`:** dmc and its version, each agent's dmc hooks (through `dmc hooks
+  status --json`), each provider's key (never the value) and roles, the Modal endpoint, the
+  microphone tool, and Muse Code with the agents' model and the estimated cost of a timelines
+  run. Each line is ok / warn / FAIL with its fix. No model calls unless `--check`, which also
+  warms Muse Glimmer.
+- **dmc (patches 0032–0035):**
+  - `dmc disable [--apply]` removes only dmc's own hooks (every supported config file, any dmc
+    build, byte-exact) and stops the watcher, keeping all history;
+  - `dmc doctor` reports a missing or non-executable dmc in a hook, a hook pointing at another dmc
+    build, a non-async Muse Interrupt hook, and an agent checkpoint left open by an ended
+    session, each with its fix;
+  - `dmc hooks status --json`.
+- **`demo/make_demo_repo.dart`:** `--help`; unknown options are errors; it refuses a non-empty
+  target or one inside another Git work tree (unless `--force`); the hook question defaults to No
+  without a terminal.
+- **`tool/export_patches.dart`** writes unnumbered patch subjects, so adding a patch never
+  rewrites the others.
+- **The runbook:** starts with `doc doctor`, covers Planned / Did, and has a section on what to
+  do if something goes wrong on camera.
+
 ## 2026-10-31: Wonder judges the timelines; demo wiring
 
 - Muse Wonder (`judge` role) ranks the finished timelines as validated JSON:

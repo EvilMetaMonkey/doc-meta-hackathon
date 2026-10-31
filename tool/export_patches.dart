@@ -54,6 +54,8 @@ Future<void> main(List<String> arguments) async {
     '--quiet',
     '--no-signature',
     '--zero-commit',
+    // Plain [PATCH] subjects: adding a patch never rewrites the others.
+    '--no-numbered',
     '--full-index',
     '-o',
     out.path,

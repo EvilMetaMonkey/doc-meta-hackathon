@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 01:57:51 -0500
-Subject: [PATCH 15/31] Document Git-mode ignore handling
+Subject: [PATCH] Document Git-mode ignore handling
 
 AGENTS.md, README.md and the website's getting-started page describe the
 two modes (Git decides inside a Git work tree; the subset parser

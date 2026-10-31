@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 26 Oct 2026 20:42:21 +0000
-Subject: [PATCH 06/31] Add dmc hooks install/uninstall/status for agent hooks
+Subject: [PATCH] Add dmc hooks install/uninstall/status for agent hooks
 
 Preview the exact JSON change by default and write only with --apply.
 Entries call an absolute path to the running dmc executable (or

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 15:25:07 -0500
-Subject: [PATCH 19/31] Keep agent hooks inside their own Git work tree
+Subject: [PATCH] Keep agent hooks inside their own Git work tree
 
 muse -w creates a linked worktree inside the repository
 (<repo>/.muse/worktrees/<date>-<hex>), so a hook there walked up into

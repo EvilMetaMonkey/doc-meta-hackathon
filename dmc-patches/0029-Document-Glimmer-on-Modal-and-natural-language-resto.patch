@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Wed, 28 Oct 2026 15:38:05 -0500
-Subject: [PATCH 29/31] Document Glimmer on Modal and natural-language restore
+Subject: [PATCH] Document Glimmer on Modal and natural-language restore
 
 doc/README.md, deploy/modal/README.md, HACKATHON.md, AGENTS.md and the
 CHANGELOG describe the Modal deployment (L40S, FP8; cold 94 s, warm about

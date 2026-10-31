@@ -67,7 +67,7 @@ export DMC_BIN="$PWD/.deps/dmc/build/dmc/bundle/bin/dmc"      # Windows: .deps\d
 # 3. Doc.
 cd doc
 dart pub get --enforce-lockfile
-dart run bin/doc.dart models          # roles, providers, and which keys are set
+dart run bin/doc.dart doctor          # is everything set up? each problem with its fix (no model calls)
 ```
 
 Keys come only from environment variables: `MODEL_API_KEY` (Meta), `BASETEN_API_KEY`, and
@@ -82,6 +82,8 @@ separately.
    `dmc hooks install --agent muse-code --apply` (and/or `--agent claude-code`).
 3. Use Doc from that folder, for example `dart run <this repo>/doc/bin/doc.dart bisect --test
    "python3 -m unittest"`.
+4. To turn recording off again, run `dmc disable` (a preview), then `dmc disable --apply`. It
+   removes only dmc's hooks and keeps every checkpoint.
 
 **Tests**, the same gates CI runs:
 
@@ -98,11 +100,13 @@ cd doc && dart pub get --enforce-lockfile && dart analyze --fatal-infos \
 [`demo/RUNBOOK.md`](demo/RUNBOOK.md) is the 3-minute video script. It was run end to end on
 2026-10-31, and it records the exact agent prompts and the timings of each step.
 
-1. `dart run demo/make_demo_repo.dart /tmp/doc-demo` builds a small Python shop with tests, a dmc
+1. `doc doctor` checks the setup.
+2. `dart run demo/make_demo_repo.dart /tmp/doc-demo` builds a small Python shop with tests, a dmc
    vault and (after asking) both agents' hooks.
-2. Four scripted Claude Code and Muse Code turns follow, one of which breaks the tests.
-3. Then `doc bisect` → `doc timelines --from-bisect` → Wonder's recommendation → `doc timelines
-   pick` → `git apply` → tests pass → a lesson → `doc start` with the brief.
+3. Four scripted Claude Code and Muse Code turns follow, one of which breaks the tests.
+4. Then `doc bisect` → `doc timelines --from-bisect` → Wonder's recommendation (Planned / Did
+   for each timeline) → `doc timelines pick` → `git apply` → tests pass → a lesson → `doc start`
+   with the brief.
 
 It includes the "Hey Doc" voice variants.
 

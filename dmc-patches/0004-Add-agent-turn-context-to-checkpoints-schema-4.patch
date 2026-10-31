@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 26 Oct 2026 20:31:25 +0000
-Subject: [PATCH 04/31] Add agent-turn context to checkpoints (schema 4)
+Subject: [PATCH] Add agent-turn context to checkpoints (schema 4)
 
 Additive migration: nullable agent, session, turn, transcript path, and
 transcript size/SHA-256 columns on checkpoints. Checkpoint JSON gains an

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Sat, 31 Oct 2026 11:11:06 -0500
+Subject: [PATCH] Document dmc disable, the doctor hook checks and hooks status
+ --json
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md    | 3 +++
+ CHANGELOG.md | 3 +++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 263d13ac662439ccafb4f46d231dcc22f63d3d8b..ff412496ce132e99e600ebdf77cff67cf17e7e3b 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -356,6 +356,9 @@ Use `docs/TESTER-READINESS-AUDIT.md` as the original audit and the Phase 2/3 han
+ - `dart run bin/dmc.dart capabilities --json`
+ - `dart run bin/dmc.dart hooks install --agent claude-code --dmc-command "dart run <repo>/bin/dmc.dart"` (preview; add `--apply` to write; see `docs/AGENT-HOOKS.md`)
+ - `dmc agent-hook <muse-code|claude-code> <event>` (called by agent hooks; always exits 0 with empty stdout)
++- `dmc hooks status --agent <agent> [--scope] --json --schema-version 1` (each event installed or missing, plus other dmc builds' hooks)
++- `dmc disable [--apply] [--json --schema-version 1]`: remove only dmc's own agent hooks (this build's and other dmc builds', in every config file the installer supports, with the exact-match uninstall and byte-exact restore) and stop the watcher; `.dmc/`, every checkpoint and other tools' hooks are untouched. Preview by default. Re-enable with `dmc hooks install`.
++- `dmc doctor [--stale-hours <h>]` also checks agent hooks: a dmc executable that is missing or not executable, a hook pointing at a different dmc build, a Muse Interrupt hook that is not async, and an agent checkpoint open longer than the age (default 2 h) by a session that looks ended (its transcript idle as long, or none found). It only suggests fixes.
+ - `dart test`
+ - `dart analyze`
+ - `dart run tool/check_analyzer.dart` (CI gate; fails on any analyzer diagnostic)
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index de4f27edeb5dccdc8eb958306bae82743749d5b5..159ebcdbcd076a88324dae10a7b2cfd4ff325801 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,8 @@
+ ## Unreleased — Meta AI Developer Hackathon 2026
+ 
++- Add `dmc disable [--apply] [--json --schema-version 1]`. It removes only dmc's own agent hooks from every config file the installer supports (the workspace's project and local files and the user files), for this dmc build and others, through the exact-match uninstall with byte-exact restore, and stops the watcher. `.dmc/`, every checkpoint and other tools' hooks are untouched. Preview by default; re-enable with `dmc hooks install`.
++- `dmc doctor` checks agent hooks: a dmc executable that is missing or not executable, a hook pointing at a different dmc build, a Muse Code Interrupt hook that is not async, and an agent checkpoint left open longer than `--stale-hours` (default 2) by a session that looks ended. It suggests the fix and changes nothing.
++- `dmc hooks status` takes `--json --schema-version 1`. `capabilities` lists `hooks.status` and `disable` (features `hooksStatusJson`, `disable`), additively.
+ - Add `doc timelines "<task>" --test "<command>"`, parallel timelines part 1 (everything but Wonder's judging).
+   - The base is a dmc export of the latest closed checkpoint's after-state, or `--from <cp> --state before|after`; the working copy is never read.
+   - Muse Wonder (`planner` role) plans exactly N (`--n`, default 3) clearly different approaches as validated JSON (`response_format` schema, strict parsing, one retry), from the task, the matched lesson brief, the base checkpoint's label and changed files and a redacted file list.

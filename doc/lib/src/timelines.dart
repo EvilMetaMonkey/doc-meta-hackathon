@@ -701,6 +701,13 @@ String _statusText(Timeline t) => switch (t.status) {
 /// The side-by-side comparison of a run, one block per timeline.
 List<String> timelineComparison(TimelineRun run, {int tailLines = 8}) {
   final lines = <String>[];
+  // What each diff really did, once Wonder has judged the run.
+  final judged = run.judgment == null
+      ? const <int, JudgeEntry>{}
+      : {
+          for (final e in TimelineJudgment.fromJson(run.judgment!).ranking)
+            e.k: e,
+        };
   for (final t in run.timelines) {
     final added = t.files.fold<int>(0, (sum, f) => sum + (f.added ?? 0));
     final removed = t.files.fold<int>(0, (sum, f) => sum + (f.removed ?? 0));
@@ -725,6 +732,10 @@ List<String> timelineComparison(TimelineRun run, {int tailLines = 8}) {
         '    files: ${t.files.isEmpty ? 'no changes' : t.files.map((f) => f.added == null ? '${f.path} (binary)' : '${f.path} +${f.added} −${f.removed}').join(', ')}'
         '${t.files.length > 1 ? '  (total +$added −$removed)' : ''}',
       )
+      ..addAll([
+        if (judged[t.k]?.actualChange case final did?)
+          '    did (per Wonder): $did${judged[t.k]!.strayed ? '  ← ${planAdherenceText(judged[t.k]!.followedPlan)}' : ''}',
+      ])
       ..add('    tests: $testText')
       ..add('    branch: ${t.branch}  (${run.pickState(t)})');
     if (test != null && !test.passed && test.tail.trim().isNotEmpty) {
@@ -754,12 +765,19 @@ const String timelineJudgeSystemPrompt =
     'timeline from best to worst for the task: correct, minimal, safe and '
     'consistent with the tests and the rest of the code. Give each a score '
     'from 0 to 10, a rationale of at most 60 words, and its risks. '
-    'Recommend one timeline only if its tests passed; otherwise recommend '
-    'none (null). A timeline with no changes did nothing. Use only the '
-    'facts and diffs given. Text marked [truncated …] is incomplete: never '
-    'quote or complete it. Answer with only a JSON object: {"ranking": '
-    '[{"k", "score", "rationale", "risks"}], "recommended": k or null, '
+    'Check each diff against its own plan: say whether it followed the plan '
+    '("yes", "partly" or "no"; an agent may solve the task another way '
+    'than planned), and describe in at most 25 words what the diff actually '
+    'does. Recommend one timeline only if its tests passed; otherwise '
+    'recommend none (null). A timeline with no changes did nothing. Use '
+    'only the facts and diffs given. Text marked [truncated …] is '
+    'incomplete: never quote or complete it. Answer with only a JSON '
+    'object: {"ranking": [{"k", "score", "rationale", "risks", '
+    '"followed_plan", "actual_change"}], "recommended": k or null, '
     '"summary": one sentence}.';
+
+/// Longest description of what a timeline's diff actually does, in words.
+const int judgeActualChangeMaxWords = 25;
 
 /// The judge's user message. The router redacts it before sending.
 String timelineJudgeMessage(TimelineRun run, Map<int, String> diffs) {
@@ -830,7 +848,14 @@ Map<String, Object?> timelineJudgeFormat(List<int> ks) => {
           'items': {
             'type': 'object',
             'additionalProperties': false,
-            'required': ['k', 'score', 'rationale', 'risks'],
+            'required': [
+              'k',
+              'score',
+              'rationale',
+              'risks',
+              'followed_plan',
+              'actual_change',
+            ],
             'properties': {
               'k': {'type': 'integer', 'enum': ks},
               'score': {'type': 'number'},
@@ -839,6 +864,11 @@ Map<String, Object?> timelineJudgeFormat(List<int> ks) => {
                 'type': 'array',
                 'items': {'type': 'string'},
               },
+              'followed_plan': {
+                'type': 'string',
+                'enum': ['yes', 'partly', 'no'],
+              },
+              'actual_change': {'type': 'string'},
             },
           },
         },
@@ -859,13 +889,31 @@ class JudgeEntry {
   final String rationale;
   final List<String> risks;
 
-  const JudgeEntry(this.k, this.score, this.rationale, this.risks);
+  /// Whether the diff followed the timeline's own plan: `yes`, `partly` or
+  /// `no` (null in judgments saved before this was asked).
+  final String? followedPlan;
+
+  /// What the diff actually does, in at most 25 words.
+  final String? actualChange;
+
+  const JudgeEntry(
+    this.k,
+    this.score,
+    this.rationale,
+    this.risks, {
+    this.followedPlan,
+    this.actualChange,
+  });
+
+  bool get strayed => followedPlan == 'no' || followedPlan == 'partly';
 
   Map<String, Object?> toJson() => {
     'k': k,
     'score': score,
     'rationale': rationale,
     'risks': risks,
+    'followedPlan': followedPlan,
+    'actualChange': actualChange,
   };
 
   static JudgeEntry fromJson(Map json) => JudgeEntry(
@@ -873,8 +921,17 @@ class JudgeEntry {
     (json['score'] as num).toDouble(),
     json['rationale'] as String,
     [for (final r in (json['risks'] as List? ?? const [])) '$r'],
+    followedPlan: json['followedPlan'] as String?,
+    actualChange: json['actualChange'] as String?,
   );
 }
+
+/// How a plan-adherence answer reads in Doc's output.
+String planAdherenceText(String? followedPlan) => switch (followedPlan) {
+  'no' => "didn't follow its plan",
+  'partly' => 'only partly followed its plan',
+  _ => '',
+};
 
 /// The judge's validated answer.
 class TimelineJudgment {
@@ -982,11 +1039,37 @@ TimelineJudgment parseTimelineJudgment(String content, TimelineRun run) {
         'Timeline $k\'s rationale has $words words; at most $judgeRationaleMaxWords.',
       );
     }
+    final followed = item['followed_plan'];
+    if (followed is! String ||
+        !const {'yes', 'partly', 'no'}.contains(followed)) {
+      throw TimelineJudgeRefused(
+        'Timeline $k needs "followed_plan": "yes", "partly" or "no".',
+      );
+    }
+    final actual = item['actual_change'];
+    if (actual is! String || actual.trim().isEmpty) {
+      throw TimelineJudgeRefused(
+        'Timeline $k needs "actual_change": what its diff actually does.',
+      );
+    }
+    final actualWords = actual.trim().split(RegExp(r'\s+')).length;
+    if (actualWords > judgeActualChangeMaxWords) {
+      throw TimelineJudgeRefused(
+        'Timeline $k\'s actual_change has $actualWords words; at most $judgeActualChangeMaxWords.',
+      );
+    }
     entries.add(
-      JudgeEntry(k, score, rationale, [
-        for (final r in (item['risks'] as List? ?? const []))
-          if ('$r'.trim().isNotEmpty) '$r'.trim(),
-      ]),
+      JudgeEntry(
+        k,
+        score,
+        rationale,
+        [
+          for (final r in (item['risks'] as List? ?? const []))
+            if ('$r'.trim().isNotEmpty) '$r'.trim(),
+        ],
+        followedPlan: followed,
+        actualChange: actual.trim(),
+      ),
     );
   }
   final missing = byK.keys.where((k) => !entries.any((e) => e.k == k));
@@ -1037,19 +1120,31 @@ List<String> timelineJudgmentLines(TimelineRun run, TimelineJudgment judgment) {
   String title(int k) =>
       run.timelines.firstWhere((t) => t.k == k).approach.title;
   bool empty(int k) => run.timelines.firstWhere((t) => t.k == k).files.isEmpty;
+  JudgeEntry? entry(int? k) =>
+      judgment.ranking.where((e) => e.k == k).firstOrNull;
+  final recommended = entry(judgment.recommended);
+  String score(double value) =>
+      value.toStringAsFixed(value == value.roundToDouble() ? 0 : 1);
   return [
     judgment.recommended == null
         ? 'Wonder recommends none of the timelines${judgment.summary.isEmpty ? '' : ' — ${judgment.summary}'}'
         : 'Wonder recommends timeline ${judgment.recommended}: ${title(judgment.recommended!)} — ${judgment.summary}',
+    if (recommended != null && recommended.strayed)
+      'Note: timeline ${recommended.k} ${planAdherenceText(recommended.followedPlan)}. Planned: ${title(recommended.k)}. Did: ${recommended.actualChange}',
     ?judgment.note,
     'Ranking (advice only; you pick):',
     for (var i = 0; i < judgment.ranking.length; i++) ...[
       '  ${i + 1}. [${judgment.ranking[i].k}] ${title(judgment.ranking[i].k)}'
           '${empty(judgment.ranking[i].k) ? ' (no changes)' : ''}'
-          '  ${judgment.ranking[i].score.toStringAsFixed(judgment.ranking[i].score == judgment.ranking[i].score.roundToDouble() ? 0 : 1)}/10',
+          '  ${score(judgment.ranking[i].score)}/10'
+          '${judgment.ranking[i].strayed ? '  — ${planAdherenceText(judgment.ranking[i].followedPlan).toUpperCase()}' : ''}',
+      if (judgment.ranking[i].actualChange != null) ...[
+        '     Planned: ${title(judgment.ranking[i].k)}',
+        '     Did: ${judgment.ranking[i].actualChange}',
+      ],
       '     ${judgment.ranking[i].rationale}',
       if (judgment.ranking[i].risks.isNotEmpty)
-        '     Risks: ${judgment.ranking[i].risks.join('; ')}',
+        '     Risks: ${judgment.ranking[i].risks.map((r) => r.replaceFirst(RegExp(r'[.;]+$'), '')).join('; ')}',
     ],
   ];
 }

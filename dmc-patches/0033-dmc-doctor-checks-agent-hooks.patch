@@ -1,0 +1,627 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Sat, 31 Oct 2026 11:11:06 -0500
+Subject: [PATCH] dmc doctor checks agent hooks
+
+For each dmc hook entry, doctor reports a dmc executable that is missing
+or not executable, an entry pointing at a different dmc build than the
+one running, and a Muse Code Interrupt hook that is not async; and an
+agent checkpoint left open longer than --stale-hours (default 2) by a
+session that looks ended (its transcript idle as long, or none found).
+Each finding comes with the fix (dmc disable / hooks install, or
+checkpoint close / release). Doctor never changes hooks or checkpoints.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/dmc.dart               |   1 +
+ lib/src/cli.dart           |  24 ++-
+ lib/src/doctor.dart        |  56 ++++++-
+ lib/src/hook_doctor.dart   | 139 +++++++++++++++++
+ test/hook_doctor_test.dart | 303 +++++++++++++++++++++++++++++++++++++
+ 5 files changed, 518 insertions(+), 5 deletions(-)
+ create mode 100644 lib/src/hook_doctor.dart
+ create mode 100644 test/hook_doctor_test.dart
+
+diff --git a/lib/dmc.dart b/lib/dmc.dart
+index d0e193e34aa891d0ba158c43afbca8f53a29febf..865624e76ccb9383a133ef2a14630c6db968258d 100644
+--- a/lib/dmc.dart
++++ b/lib/dmc.dart
+@@ -19,6 +19,7 @@ export 'src/git_ignore.dart';
+ export 'src/git_worktree.dart';
+ export 'src/hook_installer.dart';
+ export 'src/disable.dart';
++export 'src/hook_doctor.dart';
+ export 'src/hook_report.dart';
+ export 'src/machine_output.dart';
+ export 'src/status.dart';
+diff --git a/lib/src/cli.dart b/lib/src/cli.dart
+index 0b57dd55cf626f3e86bc34d1ec01e97c478e7916..b6b6454520fac55236bfc0ba2e843cc7af7c08f8 100644
+--- a/lib/src/cli.dart
++++ b/lib/src/cli.dart
+@@ -118,8 +118,16 @@ Future<int> _runStopCommand() {
+   return stopDaemon();
+ }
+ 
+-Future<int> _runDoctorCommand() async {
+-  final hadIssues = await runDoctor();
++Future<int> _runDoctorCommand(ArgResults command) async {
++  final text = command['stale-hours'] as String?;
++  final hours = text == null ? 2.0 : double.tryParse(text);
++  if (hours == null || hours <= 0) {
++    print('[DMC] Error: --stale-hours takes a positive number of hours.');
++    return 2;
++  }
++  final hadIssues = await runDoctor(
++    staleCheckpointAge: Duration(minutes: (hours * 60).round()),
++  );
+   return hadIssues ? 1 : 0;
+ }
+ 
+@@ -674,7 +682,12 @@ Future<int> _runCli(List<String> args) async {
+   parser.addCommand('stop');
+   parser.addCommand('watch');
+   parser.addCommand('status');
+-  parser.addCommand('doctor');
++  final doctorCommand = parser.addCommand('doctor');
++  doctorCommand.addOption(
++    'stale-hours',
++    help:
++        'Report an agent checkpoint from an ended session open longer than this (default 2)',
++  );
+   final disableCommand = parser.addCommand('disable');
+   disableCommand.addFlag(
+     'apply',
+@@ -887,6 +900,9 @@ Future<int> _runCli(List<String> args) async {
+     print('  watch                Watch for file changes in the foreground');
+     print('  status               Show vault health and active config');
+     print('  doctor               Check DB access and snapshot consistency');
++    print(
++      '                       and agent hooks [--stale-hours <h>] (suggests fixes only)',
++    );
+     print(
+       '  disable [--apply]    Remove only dmc\'s agent hooks and stop the watcher;',
+     );
+@@ -982,7 +998,7 @@ Future<int> _runCli(List<String> args) async {
+     case 'status':
+       return _runStatusCommand();
+     case 'doctor':
+-      return _runDoctorCommand();
++      return _runDoctorCommand(command);
+     case 'disable':
+       return runDisableCommand(
+         apply: command['apply'] as bool,
+diff --git a/lib/src/doctor.dart b/lib/src/doctor.dart
+index f4c08ea6ec4a048568751d614d7b9e71969b8443..a9c9892124e9ebab398cae4c53d8ca34bda75296 100644
+--- a/lib/src/doctor.dart
++++ b/lib/src/doctor.dart
+@@ -7,12 +7,20 @@ import 'checkpoint_operation_repository.dart';
+ import 'checkpoint_operation_models.dart';
+ import 'database.dart';
+ import 'git_worktree.dart';
++import 'hook_doctor.dart';
++import 'hook_report.dart';
+ import 'ignore.dart';
+ import 'snapshot_store.dart';
+ import 'workspace.dart';
+ import 'watcher_control.dart';
+ 
+-Future<bool> runDoctor({String? basePath, String? homePath}) async {
++Future<bool> runDoctor({
++  String? basePath,
++  String? homePath,
++  Duration staleCheckpointAge = defaultStaleCheckpointAge,
++  String? hookCommand,
++  DateTime? now,
++}) async {
+   final paths = DmcPaths(basePath: basePath);
+   final dmcDir = paths.dmcDirectory;
+   if (!await dmcDir.exists()) {
+@@ -206,8 +214,54 @@ Future<bool> runDoctor({String? basePath, String? homePath}) async {
+   print('Orphaned snapshot files: ${orphanedSnapshotFiles.length}');
+   print('Staging entries (may be active captures): ${stagingFiles.length}');
+ 
++  // Agent hooks: report and suggest fixes only.
++  final home =
++      homePath ??
++      Platform.environment['HOME'] ??
++      Platform.environment['USERPROFILE'];
++  final hookFiles = home == null
++      ? <HookConfigFile>[]
++      : [
++          for (final location in hookLocations(
++            workspaceRoot: paths.rootPath,
++            homePath: home,
++          ))
++            readHookConfigFile(location),
++        ];
++  final executableName = p
++      .basenameWithoutExtension(Platform.resolvedExecutable)
++      .toLowerCase();
++  final current =
++      hookCommand ??
++      (executableName == 'dart' || executableName == 'dartaotruntime'
++          ? null
++          : currentHookCommand());
++  final hookFindings = [
++    ...checkDmcHooks(
++      hookFiles,
++      currentCommand: current,
++      isWindows: Platform.isWindows,
++    ),
++    ?checkStaleAgentCheckpoint(
++      activeCheckpoint,
++      now: now ?? DateTime.now(),
++      staleAfter: staleCheckpointAge,
++      environment: {...Platform.environment, 'HOME': ?homePath},
++    ),
++  ];
++  final hookEntries = [for (final file in hookFiles) ...dmcHookEntries(file)];
++  print(
++    'Agent hooks: ${hookEntries.isEmpty ? 'none installed' : '${hookEntries.length} dmc hook entr${hookEntries.length == 1 ? 'y' : 'ies'} (${{for (final e in hookEntries) '${e.location.agent.id} ${e.location.scope.name}'}.join(', ')})'}',
++  );
++  print('Hook issues: ${hookFindings.length}');
++  for (final finding in hookFindings) {
++    print('Hook issue: ${finding.message}.');
++    print('  Fix: ${finding.fix}');
++  }
++
+   final hasIssues =
+       interrupted ||
++      hookFindings.isNotEmpty ||
+       !ignorePolicy.ok ||
+       (watcherErrors?.isNotEmpty ?? false) ||
+       missingSnapshotFiles.isNotEmpty ||
+diff --git a/lib/src/hook_doctor.dart b/lib/src/hook_doctor.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..e94b8689a3eb5490c7451fdb462fd84d0391a8e2
+--- /dev/null
++++ b/lib/src/hook_doctor.dart
+@@ -0,0 +1,139 @@
++import 'dart:io';
++
++import 'agent_hooks.dart';
++import 'checkpoint_models.dart';
++import 'hook_report.dart';
++
++/// `dmc doctor`'s agent-hook checks. They only report and suggest fixes:
++/// doctor never changes hooks or checkpoints.
++
++/// Default age after which an open agent checkpoint from an ended session
++/// is reported.
++const Duration defaultStaleCheckpointAge = Duration(hours: 2);
++
++class HookFinding {
++  final String message;
++  final String fix;
++
++  const HookFinding(this.message, this.fix);
++}
++
++String _where(HookLocation location) =>
++    '${location.agent.displayName} ${location.scope.name} hook';
++
++String _scopeArgs(HookLocation location) =>
++    '--agent ${location.agent.id} --scope ${location.scope.name}';
++
++/// Problems with the dmc hook entries in [files]. [currentCommand] is the
++/// command this dmc writes into hooks, or null when it is unknown (running
++/// under the Dart VM), in which case the different-build check is skipped.
++List<HookFinding> checkDmcHooks(
++  List<HookConfigFile> files, {
++  required String? currentCommand,
++  bool isWindows = false,
++}) {
++  final findings = <HookFinding>[];
++  for (final file in files) {
++    if (!file.exists) continue;
++    if (file.error != null) {
++      findings.add(
++        HookFinding(
++          '${file.location.path} is ${file.error}, so its hooks cannot be checked',
++          'fix the JSON by hand',
++        ),
++      );
++      continue;
++    }
++    final entries = dmcHookEntries(file);
++    final reported = <String>{};
++    for (final entry in entries) {
++      final location = entry.location;
++      final key = '${entry.dmcCommand}\u0000';
++      final executable = hookExecutablePath(entry.dmcCommand);
++      if (executable != null && reported.add('${key}path')) {
++        final type = FileSystemEntity.typeSync(executable);
++        if (type == FileSystemEntityType.notFound) {
++          findings.add(
++            HookFinding(
++              '${_where(location)} runs $executable, which does not exist (agent turns are not being recorded)',
++              'dmc disable --apply, then dmc hooks install ${_scopeArgs(location)} --apply',
++            ),
++          );
++        } else if (!isWindows &&
++            type == FileSystemEntityType.file &&
++            (File(executable).statSync().mode & 0x49) == 0) {
++          findings.add(
++            HookFinding(
++              '${_where(location)} runs $executable, which is not executable',
++              'chmod +x "$executable", or reinstall: dmc disable --apply, then dmc hooks install ${_scopeArgs(location)} --apply',
++            ),
++          );
++        }
++      }
++      if (currentCommand != null &&
++          entry.dmcCommand != currentCommand &&
++          reported.add('${key}build${location.path}')) {
++        findings.add(
++          HookFinding(
++            '${_where(location)} points at a different dmc build (${entry.dmcCommand}) than this one ($currentCommand)',
++            'dmc disable --apply, then dmc hooks install ${_scopeArgs(location)} --apply (with this dmc)',
++          ),
++        );
++      }
++      if (location.agent == HookAgent.museCode &&
++          entry.event == 'Interrupt' &&
++          !entry.async) {
++        findings.add(
++          HookFinding(
++            '${_where(location)} for Interrupt is not async (Muse Code requires async Interrupt handlers)',
++            'dmc hooks uninstall ${_scopeArgs(location)} --apply, then dmc hooks install ${_scopeArgs(location)} --apply',
++          ),
++        );
++      }
++    }
++  }
++  return findings;
++}
++
++/// An agent checkpoint left open longer than [staleAfter] by a session that
++/// looks ended: its transcript was last written longer than [staleAfter]
++/// ago, or none can be found. Null otherwise.
++HookFinding? checkStaleAgentCheckpoint(
++  CheckpointRecord? active, {
++  required DateTime now,
++  Duration staleAfter = defaultStaleCheckpointAge,
++  Map<String, String> environment = const {},
++}) {
++  final agent = active?.agent;
++  if (active == null ||
++      agent == null ||
++      active.status != CheckpointStatus.open) {
++    return null;
++  }
++  final age = now.difference(
++    DateTime.fromMillisecondsSinceEpoch(active.createdAt),
++  );
++  if (age < staleAfter) return null;
++  var transcript = agent.transcriptPath;
++  if (transcript == null &&
++      agent.agent == HookAgent.museCode.id &&
++      agent.sessionId != null) {
++    transcript = findMuseTranscript(agent.sessionId!, environment);
++  }
++  String activity;
++  if (transcript != null && File(transcript).existsSync()) {
++    final idle = now.difference(File(transcript).lastModifiedSync());
++    if (idle < staleAfter) return null;
++    activity = 'its transcript was last written ${_hours(idle)} ago';
++  } else {
++    activity = 'no transcript for its session was found';
++  }
++  return HookFinding(
++    'agent checkpoint ${active.id} (${agent.agent}${agent.sessionId == null ? '' : ', session ${agent.sessionId}'}) has been open for ${_hours(age)} and its session looks ended ($activity)',
++    'dmc checkpoint close ${active.id} (keeps the turn), or dmc checkpoint release ${active.id} (abandons it)',
++  );
++}
++
++String _hours(Duration duration) => duration.inMinutes < 120
++    ? '${duration.inMinutes} min'
++    : '${(duration.inMinutes / 60).toStringAsFixed(1)} h';
+diff --git a/test/hook_doctor_test.dart b/test/hook_doctor_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e01942e44a7fefbf105d435930748af0e52e415
+--- /dev/null
++++ b/test/hook_doctor_test.dart
+@@ -0,0 +1,303 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:dmc/dmc.dart';
++import 'package:path/path.dart' as p;
++import 'package:test/test.dart';
++
++void main() {
++  late Directory sandbox;
++  late Directory root;
++  late Directory home;
++
++  setUp(() async {
++    sandbox = Directory.systemTemp.createTempSync('dmc_hook_doctor_');
++    root = Directory(p.join(sandbox.path, 'project'))..createSync();
++    home = Directory(p.join(sandbox.path, 'home'))..createSync();
++    await initDmc(basePath: root.path);
++  });
++
++  tearDown(() {
++    if (sandbox.existsSync()) sandbox.deleteSync(recursive: true);
++  });
++
++  /// A real executable file to point hooks at.
++  String executable(String name) {
++    final file = File(p.join(sandbox.path, name))
++      ..writeAsStringSync('#!/bin/sh\n');
++    if (!Platform.isWindows) Process.runSync('chmod', ['+x', file.path]);
++    return file.path;
++  }
++
++  Map<String, Object?> config(
++    String command,
++    String agent,
++    List<String> events, {
++    bool asyncInterrupt = true,
++  }) => {
++    'hooks': {
++      for (final event in events)
++        event: [
++          {
++            'matcher': '*',
++            'hooks': [
++              {
++                'type': 'command',
++                'command': '$command agent-hook $agent $event',
++                if (event == 'Interrupt' && asyncInterrupt) 'async': true,
++              },
++              {'type': 'command', 'command': 'echo other-tool'},
++            ],
++          },
++        ],
++    },
++  };
++
++  HookConfigFile file(
++    HookAgent agent,
++    HookScope scope,
++    Map<String, Object?> json,
++  ) {
++    final location = HookLocation(
++      agent,
++      scope,
++      p.join(sandbox.path, '${agent.id}-${scope.name}.json'),
++    );
++    File(location.path).writeAsStringSync(jsonEncode(json));
++    return readHookConfigFile(location);
++  }
++
++  test(
++    'a healthy hook for this dmc reports nothing; other tools are ignored',
++    () {
++      final dmc = executable('dmc');
++      final findings = checkDmcHooks([
++        file(
++          HookAgent.claudeCode,
++          HookScope.local,
++          config(dmc, 'claude-code', ['Stop']),
++        ),
++        file(
++          HookAgent.museCode,
++          HookScope.user,
++          config(dmc, 'muse-code', ['Stop', 'Interrupt']),
++        ),
++      ], currentCommand: dmc);
++      expect(findings, isEmpty);
++      expect(
++        dmcHookEntries(
++          file(
++            HookAgent.claudeCode,
++            HookScope.local,
++            config(dmc, 'claude-code', ['Stop']),
++          ),
++        ).map((e) => e.command),
++        ['$dmc agent-hook claude-code Stop'],
++      );
++    },
++  );
++
++  test('a missing dmc executable is reported with the fix', () {
++    final findings = checkDmcHooks([
++      file(
++        HookAgent.claudeCode,
++        HookScope.local,
++        config('/gone/dmc', 'claude-code', ['Stop', 'SessionEnd']),
++      ),
++    ], currentCommand: null);
++    expect(findings, hasLength(1));
++    expect(
++      findings.single.message,
++      contains('/gone/dmc, which does not exist'),
++    );
++    expect(
++      findings.single.fix,
++      'dmc disable --apply, then dmc hooks install --agent claude-code --scope local --apply',
++    );
++  });
++
++  test('a dmc that is not executable is reported', () {
++    if (Platform.isWindows) return;
++    final plain = File(p.join(sandbox.path, 'plain-dmc'))
++      ..writeAsStringSync('x');
++    final findings = checkDmcHooks([
++      file(
++        HookAgent.claudeCode,
++        HookScope.local,
++        config(plain.path, 'claude-code', ['Stop']),
++      ),
++    ], currentCommand: null);
++    expect(findings.single.message, contains('is not executable'));
++    expect(findings.single.fix, startsWith('chmod +x'));
++  });
++
++  test(
++    'a hook pointing at a different dmc build is reported once per file',
++    () {
++      final old = executable('old-dmc');
++      final current = executable('dmc');
++      final findings = checkDmcHooks([
++        file(
++          HookAgent.museCode,
++          HookScope.user,
++          config(old, 'muse-code', ['UserPromptSubmit', 'Stop', 'Interrupt']),
++        ),
++      ], currentCommand: current);
++      expect(findings, hasLength(1));
++      expect(
++        findings.single.message,
++        contains('different dmc build ($old) than this one ($current)'),
++      );
++      expect(
++        findings.single.fix,
++        contains('dmc hooks install --agent muse-code --scope user --apply'),
++      );
++    },
++  );
++
++  test('a Muse Interrupt hook that is not async is reported', () {
++    final dmc = executable('dmc');
++    final findings = checkDmcHooks([
++      file(
++        HookAgent.museCode,
++        HookScope.user,
++        config(dmc, 'muse-code', ['Interrupt'], asyncInterrupt: false),
++      ),
++    ], currentCommand: dmc);
++    expect(findings.single.message, contains('Interrupt is not async'));
++    expect(
++      findings.single.fix,
++      contains('dmc hooks uninstall --agent muse-code --scope user --apply'),
++    );
++  });
++
++  CheckpointRecord open({
++    required DateTime created,
++    String? transcript,
++    String agent = 'claude-code',
++  }) => CheckpointRecord(
++    id: 'cp_stale',
++    label: 'turn',
++    source: agent,
++    status: CheckpointStatus.open,
++    manifestVersion: 1,
++    createdAt: created.millisecondsSinceEpoch,
++    closedAt: null,
++    releasedAt: null,
++    policyFingerprint: 'x',
++    fatalErrorCount: 0,
++    exclusionCount: 0,
++    agent: CheckpointAgentContext(
++      agent: agent,
++      sessionId: 's1',
++      transcriptPath: transcript,
++    ),
++  );
++
++  test(
++    'an agent checkpoint open past the age from an ended session is reported',
++    () {
++      final now = DateTime.now();
++      final transcript = File(p.join(sandbox.path, 't.jsonl'))
++        ..writeAsStringSync('{}');
++      transcript.setLastModifiedSync(now.subtract(const Duration(hours: 3)));
++      final stale = checkStaleAgentCheckpoint(
++        open(
++          created: now.subtract(const Duration(hours: 3)),
++          transcript: transcript.path,
++        ),
++        now: now,
++      );
++      expect(
++        stale!.message,
++        contains('cp_stale (claude-code, session s1) has been open for 3.0 h'),
++      );
++      expect(stale.message, contains('transcript was last written'));
++      expect(
++        stale.fix,
++        'dmc checkpoint close cp_stale (keeps the turn), or dmc checkpoint release cp_stale (abandons it)',
++      );
++
++      // Too young, or the session is still writing: nothing.
++      expect(
++        checkStaleAgentCheckpoint(
++          open(created: now.subtract(const Duration(minutes: 30))),
++          now: now,
++        ),
++        isNull,
++      );
++      transcript.setLastModifiedSync(now.subtract(const Duration(minutes: 5)));
++      expect(
++        checkStaleAgentCheckpoint(
++          open(
++            created: now.subtract(const Duration(hours: 3)),
++            transcript: transcript.path,
++          ),
++          now: now,
++        ),
++        isNull,
++      );
++      // No transcript: reported. A shorter configured age applies.
++      expect(
++        checkStaleAgentCheckpoint(
++          open(
++            created: now.subtract(const Duration(minutes: 40)),
++            transcript: null,
++          ),
++          now: now,
++          staleAfter: const Duration(minutes: 30),
++        )!.message,
++        contains('no transcript for its session was found'),
++      );
++    },
++  );
++
++  test(
++    'doctor prints hook findings and suggests fixes without changing anything',
++    () async {
++      final claude = File(p.join(root.path, '.claude', 'settings.local.json'))
++        ..createSync(recursive: true)
++        ..writeAsStringSync(
++          jsonEncode(config('/gone/dmc', 'claude-code', ['Stop'])),
++        );
++      final before = claude.readAsStringSync();
++      final output = <String>[];
++      final hadIssues = await runZoned(
++        () => runDoctor(
++          basePath: root.path,
++          homePath: home.path,
++          hookCommand: '/gone/dmc',
++        ),
++        zoneSpecification: ZoneSpecification(
++          print: (_, _, _, line) => output.add(line),
++        ),
++      );
++      expect(hadIssues, isTrue);
++      expect(
++        output,
++        contains('Agent hooks: 1 dmc hook entry (claude-code local)'),
++      );
++      expect(output, contains('Hook issues: 1'));
++      expect(
++        output.join('\n'),
++        contains(
++          'Fix: dmc disable --apply, then dmc hooks install --agent claude-code --scope local --apply',
++        ),
++      );
++      expect(claude.readAsStringSync(), before);
++
++      // Without hooks: none installed, no hook issues.
++      claude.deleteSync();
++      output.clear();
++      await runZoned(
++        () => runDoctor(basePath: root.path, homePath: home.path),
++        zoneSpecification: ZoneSpecification(
++          print: (_, _, _, line) => output.add(line),
++        ),
++      );
++      expect(output, contains('Agent hooks: none installed'));
++      expect(output, contains('Hook issues: 0'));
++    },
++  );
++}

@@ -473,7 +473,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   // The agents' model: --agent-model, else Muse Code's configured default.
   final agentModel = (args['agent-model'] as String?)?.trim();
   final configured = agentModel == null || agentModel.isEmpty
-      ? museConfiguredModel(_museSettings(context.env))
+      ? museConfiguredModel(readMuseSettings(context.env))
       : null;
   final model = (agentModel != null && agentModel.isNotEmpty)
       ? agentModel
@@ -491,7 +491,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     costText = '≤ \$${single.toStringAsFixed(2)}';
     say(
       'Estimate: at most \$${single.toStringAsFixed(2)} on $model (${agentModel != null && agentModel.isNotEmpty ? '--agent-model' : 'Muse Code\'s configured model'}): $perStep. '
-      'Muse Code bills its own Meta account; Doc reads the real tokens afterwards. Use --agent-model muse-spark-1.3-contributor for the cheapest run.',
+      'Muse Code bills its own Meta account; Doc reads the real tokens afterwards.${model == 'muse-spark-1.3-contributor' ? '' : ' Use --agent-model muse-spark-1.3-contributor for the cheapest run.'}',
     );
   } else {
     costText =
@@ -869,7 +869,15 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     ..seconds = clock.elapsedMilliseconds / 1000;
   _save(context, active);
 
-  // 7. Compare.
+  // 7–8. Wonder's judgment (advice only), then the comparison, which shows
+  // what each diff really did, then the judgment.
+  final judgmentLines = <String>[];
+  if (!interrupted && !(args['no-judge'] as bool)) {
+    say('');
+    say('Asking Muse Wonder to judge the timelines…');
+    await _judge(context, active, judgmentLines.add);
+    _save(context, active);
+  }
   say('');
   say(
     'Run $runId (${clockText(active.seconds)} wall time). Base: $baseId $state.',
@@ -884,11 +892,9 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   say(
     'Muse Code: \$${spent.toStringAsFixed(4)} (from each run\'s reported tokens); planner: \$${plannerCost.toStringAsFixed(4)}.',
   );
-  // 8. Wonder's judgment: advice only.
-  if (!interrupted && !(args['no-judge'] as bool)) {
+  if (judgmentLines.isNotEmpty) {
     say('');
-    await _judge(context, active, say);
-    _save(context, active);
+    judgmentLines.forEach(say);
   }
   say(
     interrupted
@@ -1101,12 +1107,14 @@ Future<int> _judgeCommand(DocContext context) async {
   final run = _load(context, rest[2]);
   final json = context.args['json'] as bool;
   void say(String line) => json ? context.log(line) : context.out.writeln(line);
+  final lines = <String>[];
+  final judged = await _judge(context, run, lines.add);
+  _save(context, run);
   for (final line in timelineComparison(run)) {
     say(line);
   }
   say('');
-  final judged = await _judge(context, run, say);
-  _save(context, run);
+  lines.forEach(say);
   if (json) context.out.writeln(jsonEncode(run.toJson()));
   return judged ? 0 : 1;
 }
@@ -1228,7 +1236,7 @@ Future<bool> _judge(
 
 /// Muse Code's user settings (read-only, for its default model):
 /// `$XDG_CONFIG_HOME/muse/settings.json`, else `~/.config/muse/settings.json`.
-String? _museSettings(Map<String, String> env) {
+String? readMuseSettings(Map<String, String> env) {
   final xdg = env['XDG_CONFIG_HOME'];
   final home = env['HOME'] ?? env['USERPROFILE'];
   final path = xdg != null && xdg.isNotEmpty

@@ -31,10 +31,26 @@ class DmcClient {
   final String executable;
   final Duration timeout;
 
+  /// Home-related variables from Doc's environment, passed to dmc so it
+  /// reads the same user-scope hook files and config Doc does (tests use
+  /// a throwaway HOME). The rest of the environment is inherited.
+  final Map<String, String> homeEnvironment;
+
   const DmcClient(
     this.executable, {
     this.timeout = const Duration(seconds: 60),
+    this.homeEnvironment = const {},
   });
+
+  static Map<String, String> _home(Map<String, String> environment) => {
+    for (final key in const [
+      'HOME',
+      'USERPROFILE',
+      'XDG_CONFIG_HOME',
+      'XDG_DATA_HOME',
+    ])
+      key: ?environment[key],
+  };
 
   /// Find dmc: [explicit] (`--dmc`), then `DMC_BIN`, then each `dmc` on PATH.
   /// Every candidate must pass `dmc capabilities --json --schema-version 1`.
@@ -47,7 +63,10 @@ class DmcClient {
     final named = explicit ?? environment['DMC_BIN'];
     if (named != null && named.trim().isNotEmpty) {
       final source = explicit != null ? '--dmc' : 'DMC_BIN';
-      final client = DmcClient(p.normalize(p.absolute(named.trim())));
+      final client = DmcClient(
+        p.normalize(p.absolute(named.trim())),
+        homeEnvironment: _home(environment),
+      );
       final problem = await client._checkCapabilities();
       if (problem != null) {
         throw DmcException(
@@ -62,7 +81,7 @@ class DmcClient {
         skipped.add('$candidate (Apple\'s Disk Mount Conditioner, not dmc)');
         continue;
       }
-      final client = DmcClient(candidate);
+      final client = DmcClient(candidate, homeEnvironment: _home(environment));
       final problem = await client._checkCapabilities();
       if (problem == null) return client;
       skipped.add('$candidate ($problem)');
@@ -144,6 +163,7 @@ class DmcClient {
         executable,
         args,
         workingDirectory: workspace,
+        environment: homeEnvironment,
         stdoutEncoding: utf8,
         stderrEncoding: utf8,
       ).timeout(timeout);

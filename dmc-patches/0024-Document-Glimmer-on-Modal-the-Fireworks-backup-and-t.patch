@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Wed, 28 Oct 2026 01:45:25 -0500
-Subject: [PATCH 24/31] Document Glimmer on Modal, the Fireworks backup and the
+Subject: [PATCH] Document Glimmer on Modal, the Fireworks backup and the
  lesson library
 
 doc/README.md covers the modal and fireworks providers, the fallback

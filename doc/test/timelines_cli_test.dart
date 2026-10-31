@@ -603,6 +603,12 @@ void main() {
               'score': score,
               'rationale': why,
               'risks': ['none seen'],
+              'followed_plan': k == 2 ? 'no' : 'yes',
+              'actual_change': k == 1
+                  ? 'Writes good to state.txt.'
+                  : k == 2
+                  ? 'Adds notes.txt; state.txt still says bad.'
+                  : 'Changes nothing.',
             },
         ],
         'recommended': recommended,
@@ -653,10 +659,27 @@ void main() {
     expect(
       text,
       contains(
-        'Ranking (advice only; you pick):\n  1. [1] Put the value back  8/10',
+        'Ranking (advice only; you pick):\n  1. [1] Put the value back  8/10\n'
+        '     Planned: Put the value back\n'
+        '     Did: Writes good to state.txt.',
       ),
     );
-    expect(text, contains('  2. [2] Write notes  2/10'));
+    expect(
+      text,
+      contains("  2. [2] Write notes  2/10  — DIDN'T FOLLOW ITS PLAN"),
+    );
+    // The comparison (printed after judging) shows what each diff did.
+    expect(text, contains('    did (per Wonder): Writes good to state.txt.'));
+    expect(
+      text,
+      contains(
+        "    did (per Wonder): Adds notes.txt; state.txt still says bad.  ← didn't follow its plan",
+      ),
+    );
+    expect(
+      text.indexOf('did (per Wonder)'),
+      lessThan(text.indexOf('Wonder recommends')),
+    );
     expect(text, contains('  3. [3] Just look (no changes)  9/10'));
     expect(text, contains('Advice only: nothing was applied.'));
     expect(meta.requests, hasLength(2));

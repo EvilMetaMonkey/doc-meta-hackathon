@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: EvilMetaMonkey <hood.mj85@gmail.com>
 Date: Tue, 27 Oct 2026 20:45:01 -0500
-Subject: [PATCH 23/31] Retry the delete in the watcher rename test
+Subject: [PATCH] Retry the delete in the watcher rename test
 
 On Windows the watcher can still hold renamed.txt open for a capture
 when the test deletes it (errno 32, seen once in CI run 40540474040).

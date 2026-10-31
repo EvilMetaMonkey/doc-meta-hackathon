@@ -8,6 +8,7 @@ export 'src/bisect_store.dart';
 export 'src/cli.dart';
 export 'src/config.dart';
 export 'src/dmc_client.dart';
+export 'src/doctor_command.dart';
 export 'src/lesson_commands.dart';
 export 'src/lessons.dart';
 export 'src/model_client.dart';

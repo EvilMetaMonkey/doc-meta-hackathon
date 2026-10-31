@@ -1,0 +1,920 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Sat, 31 Oct 2026 11:11:05 -0500
+Subject: [PATCH] Add dmc disable and JSON hooks status
+
+dmc disable [--apply] [--json --schema-version 1] removes only dmc's own
+agent hooks and stops the watcher. It checks every config file the
+installer supports (the workspace's project and local files and the user
+files), finds handlers of the form "<dmc> agent-hook <agent> <event>" for
+this dmc build and others, and removes them with the exact-match
+uninstall, writing each file back in its original layout (or removing a
+file dmc created). .dmc/, every checkpoint and other tools' hooks are
+untouched. Preview by default; re-enable with dmc hooks install.
+
+dmc hooks status takes --json --schema-version 1, and capabilities lists
+hooks.status and disable (additive).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/dmc.dart                |   2 +
+ lib/src/cli.dart            |  47 ++++++++
+ lib/src/disable.dart        | 186 ++++++++++++++++++++++++++++++
+ lib/src/hook_installer.dart |  74 +++++++++---
+ lib/src/hook_report.dart    | 185 +++++++++++++++++++++++++++++
+ test/disable_test.dart      | 224 ++++++++++++++++++++++++++++++++++++
+ 6 files changed, 704 insertions(+), 14 deletions(-)
+ create mode 100644 lib/src/disable.dart
+ create mode 100644 lib/src/hook_report.dart
+ create mode 100644 test/disable_test.dart
+
+diff --git a/lib/dmc.dart b/lib/dmc.dart
+index 06854c75fd14daa639679fcc39bb8c2da6018c05..d0e193e34aa891d0ba158c43afbca8f53a29febf 100644
+--- a/lib/dmc.dart
++++ b/lib/dmc.dart
+@@ -18,6 +18,8 @@ export 'src/gc.dart';
+ export 'src/git_ignore.dart';
+ export 'src/git_worktree.dart';
+ export 'src/hook_installer.dart';
++export 'src/disable.dart';
++export 'src/hook_report.dart';
+ export 'src/machine_output.dart';
+ export 'src/status.dart';
+ export 'src/ignore.dart';
+diff --git a/lib/src/cli.dart b/lib/src/cli.dart
+index e0ee26cd196c226019c38c6f0cb9732566830de1..0b57dd55cf626f3e86bc34d1ec01e97c478e7916 100644
+--- a/lib/src/cli.dart
++++ b/lib/src/cli.dart
+@@ -10,6 +10,7 @@ import 'daemon.dart';
+ import 'doctor.dart';
+ import 'diff.dart';
+ import 'gc.dart';
++import 'disable.dart';
+ import 'hook_installer.dart';
+ import 'init.dart';
+ import 'log.dart';
+@@ -175,6 +176,10 @@ Future<int> _runHooksCommand(ArgResults command) {
+     scopeName: subcommand['scope'] as String?,
+     apply: subcommand.options.contains('apply') && subcommand['apply'] as bool,
+     dmcCommand: subcommand['dmc-command'] as String?,
++    json: subcommand.options.contains('json') && subcommand['json'] as bool,
++    requestedSchemaVersion: subcommand.options.contains('schema-version')
++        ? subcommand['schema-version'] as String?
++        : null,
+   );
+ }
+ 
+@@ -433,6 +438,8 @@ int _runCapabilitiesCommand({
+         'checkpoint.recover',
+         'checkpoint.release',
+         'checkpoint.export',
++        'hooks.status',
++        'disable',
+       ],
+       'features': {
+         'checkpointApply': true,
+@@ -444,6 +451,8 @@ int _runCapabilitiesCommand({
+         'fileContentsInJson': false,
+         'checkpointExport': true,
+         'policyDriftPerFile': true,
++        'hooksStatusJson': true,
++        'disable': true,
+       },
+       'cancellation': {
+         'capture': 'detect_interrupted_checkpoint',
+@@ -666,6 +675,21 @@ Future<int> _runCli(List<String> args) async {
+   parser.addCommand('watch');
+   parser.addCommand('status');
+   parser.addCommand('doctor');
++  final disableCommand = parser.addCommand('disable');
++  disableCommand.addFlag(
++    'apply',
++    negatable: false,
++    help: 'Remove dmc\'s hooks and stop the watcher (default: preview only)',
++  );
++  disableCommand.addFlag(
++    'json',
++    negatable: false,
++    help: 'Print the versioned machine-readable result',
++  );
++  disableCommand.addOption(
++    'schema-version',
++    help: 'Require a supported machine schema version',
++  );
+   parser.addCommand('ui');
+   parser.addCommand('snap');
+   final capabilitiesCommand = parser.addCommand('capabilities');
+@@ -780,6 +804,16 @@ Future<int> _runCli(List<String> args) async {
+         negatable: false,
+         help: 'Write the change (default: preview only)',
+       );
++    } else {
++      hooksSubcommand.addFlag(
++        'json',
++        negatable: false,
++        help: 'Print the versioned machine-readable result',
++      );
++      hooksSubcommand.addOption(
++        'schema-version',
++        help: 'Require a supported machine schema version',
++      );
+     }
+   }
+   final gcCommand = parser.addCommand('gc');
+@@ -853,6 +887,12 @@ Future<int> _runCli(List<String> args) async {
+     print('  watch                Watch for file changes in the foreground');
+     print('  status               Show vault health and active config');
+     print('  doctor               Check DB access and snapshot consistency');
++    print(
++      '  disable [--apply]    Remove only dmc\'s agent hooks and stop the watcher;',
++    );
++    print(
++      '                       history is kept (re-enable: dmc hooks install)',
++    );
+     print('  ui                   Launch the interactive terminal dashboard');
+     print('  snap                 Capture a manual workspace snapshot');
+     print(
+@@ -895,6 +935,7 @@ Future<int> _runCli(List<String> args) async {
+   }
+ 
+   const noFileArguments = {
++    'disable',
+     'init',
+     'start',
+     'stop',
+@@ -942,6 +983,12 @@ Future<int> _runCli(List<String> args) async {
+       return _runStatusCommand();
+     case 'doctor':
+       return _runDoctorCommand();
++    case 'disable':
++      return runDisableCommand(
++        apply: command['apply'] as bool,
++        json: command['json'] as bool,
++        requestedSchemaVersion: command['schema-version'] as String?,
++      );
+     case 'ui':
+       return _runUiCommand();
+     case 'task':
+diff --git a/lib/src/disable.dart b/lib/src/disable.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c66294c9d290395ccf3cbd15f5114502d0e8cb7
+--- /dev/null
++++ b/lib/src/disable.dart
+@@ -0,0 +1,186 @@
++import 'dart:io';
++
++import 'agent_hooks.dart';
++import 'daemon.dart';
++import 'hook_installer.dart';
++import 'hook_report.dart';
++import 'machine_output.dart';
++import 'watcher_control.dart';
++import 'workspace.dart';
++
++/// `dmc disable [--apply] [--json --schema-version 1]`: remove only dmc's
++/// own agent hooks and stop the watcher. Code, history (`.dmc/` and every
++/// checkpoint) and other tools' hooks are untouched.
++///
++/// Every config file the installer supports is checked: the workspace's
++/// project and local files and the user files. User-scope hooks serve every
++/// dmc workspace, so removing them disables recording in all of them. Each
++/// dmc command found (this build or another) is removed with the installer's
++/// exact-match uninstall, and the file is written back in its original
++/// layout (removed if dmc created it). Preview by default.
++Future<int> runDisableCommand({
++  bool apply = false,
++  bool json = false,
++  String? requestedSchemaVersion,
++  String? currentDirectory,
++  String? homePath,
++}) async {
++  final cwd = currentDirectory ?? Directory.current.path;
++  final schemaFailure = validateMachineSchemaRequest(
++    'disable',
++    requestedSchemaVersion,
++    json: json,
++  );
++  if (schemaFailure != null) {
++    if (json) {
++      print(schemaFailure.withWorkspace(cwd).encode());
++    } else {
++      print('[DMC] Error: ${schemaFailure.errors.single.message}');
++    }
++    return schemaFailure.exitCode;
++  }
++  final home =
++      homePath ??
++      Platform.environment['HOME'] ??
++      Platform.environment['USERPROFILE'];
++  if (home == null) {
++    return _fail(json, cwd, 'home_unknown', 'Cannot find the home directory.');
++  }
++  final root = findDmcWorkspace(cwd);
++
++  final removed = <DmcHookEntry>[];
++  final problems = <MachineMessage>[];
++  final writes = <(HookConfigFile, Map<String, Object?>)>[];
++  for (final location in hookLocations(workspaceRoot: root, homePath: home)) {
++    final file = readHookConfigFile(location);
++    if (!file.exists) continue;
++    if (file.error != null) {
++      problems.add(
++        MachineMessage(
++          'hook_config_unreadable',
++          '${location.path} is ${file.error}; it was left alone.',
++        ),
++      );
++      continue;
++    }
++    final entries = dmcHookEntries(file);
++    if (entries.isEmpty) continue;
++    var after = file.config!;
++    for (final dmcCommand in {for (final e in entries) e.dmcCommand}) {
++      after = planHookUninstall(after, location.agent, dmcCommand).after;
++    }
++    removed.addAll(entries);
++    writes.add((file, after));
++  }
++
++  final paths = root == null ? null : DmcPaths(basePath: root);
++  final watcherRunning = paths != null && await queryWatcher(paths) != null;
++
++  if (!json) {
++    print('[DMC] Disable: remove dmc\'s own agent hooks and stop the watcher');
++    print(
++      'Workspace: ${root ?? '(none here; only user-scope hooks are checked)'}',
++    );
++    if (removed.isEmpty) {
++      print('No dmc hooks found.');
++    }
++    for (final location in {for (final e in removed) e.location}) {
++      print(
++        '${location.agent.displayName} (${location.scope.name}): ${location.path}',
++      );
++      for (final entry in removed.where((e) => e.location == location)) {
++        print('  - ${entry.event}: ${entry.command}');
++      }
++      if (location.scope == HookScope.user) {
++        print(
++          '  Note: user-scope hooks serve every dmc workspace; removing them stops recording in all of them.',
++        );
++      }
++    }
++    print('Watcher: ${watcherRunning ? 'running' : 'not running'}');
++    print(
++      'Kept: ${root == null ? 'all history' : '${paths!.dmcDirectory.path} and every checkpoint'}, your code, and every other hook.',
++    );
++    for (final problem in problems) {
++      print('Warning: ${problem.message}');
++    }
++  }
++
++  var stopped = false;
++  var watcherExit = 0;
++  if (apply) {
++    for (final (file, after) in writes) {
++      final deleted = writeHookConfigFile(file, after);
++      if (!json) {
++        print(
++          deleted
++              ? '[DMC] Removed ${file.location.path}, which held only dmc hooks.'
++              : '[DMC] Wrote ${file.location.path}.',
++        );
++      }
++    }
++    if (watcherRunning) {
++      watcherExit = await stopDaemon(basePath: root);
++      stopped = watcherExit == 0;
++    }
++    if (!json) {
++      print(
++        removed.isEmpty && !watcherRunning
++            ? '[DMC] Nothing to disable.'
++            : '[DMC] Disabled. Turn recording back on with: dmc hooks install --agent <muse-code|claude-code> --apply',
++      );
++    }
++  } else if (!json) {
++    print(
++      removed.isEmpty && !watcherRunning
++          ? '[DMC] Nothing to disable.'
++          : '[DMC] Preview only. Run again with --apply to remove these hooks${watcherRunning ? ' and stop the watcher' : ''}.',
++    );
++  }
++
++  final exitCode = apply && watcherRunning && !stopped ? 1 : 0;
++  if (json) {
++    print(
++      CommandResult(
++        command: 'disable',
++        exitCode: exitCode,
++        data: {
++          'mode': apply ? 'apply' : 'preview',
++          'workspaceRoot': root,
++          'hooks': [for (final e in removed) e.toJson()],
++          'removedConfigFiles': [
++            if (apply)
++              for (final (file, after) in writes)
++                if (after.isEmpty) file.location.path,
++          ],
++          'watcher': {'running': watcherRunning, 'stopped': stopped},
++          'historyKept': true,
++        },
++        warnings: problems,
++        errors: [
++          if (exitCode != 0)
++            const MachineMessage(
++              'watcher_stop_failed',
++              'The watcher did not stop; run dmc stop, then dmc doctor.',
++            ),
++        ],
++      ).withWorkspace(root ?? cwd).encode(),
++    );
++  }
++  return exitCode;
++}
++
++int _fail(bool json, String cwd, String code, String message) {
++  if (json) {
++    print(
++      CommandResult(
++        command: 'disable',
++        exitCode: 1,
++        errors: [MachineMessage(code, message)],
++      ).withWorkspace(cwd).encode(),
++    );
++  } else {
++    print('[DMC] Error: $message');
++  }
++  return 1;
++}
+diff --git a/lib/src/hook_installer.dart b/lib/src/hook_installer.dart
+index 3e7e7a0e0be7fc894cbcb5babf3908cc7a1e5442..a1877fb7314dcd66a278679f791abda8b78a6dd8 100644
+--- a/lib/src/hook_installer.dart
++++ b/lib/src/hook_installer.dart
+@@ -4,6 +4,7 @@ import 'dart:io';
+ import 'package:path/path.dart' as p;
+ 
+ import 'agent_hooks.dart';
++import 'machine_output.dart';
+ 
+ /// Where an agent's hook configuration is written.
+ enum HookScope { project, local, user }
+@@ -326,14 +327,33 @@ Future<int> runHooksCommand({
+   String? currentDirectory,
+   String? homePath,
+   String? executable,
++  bool json = false,
++  String? requestedSchemaVersion,
+ }) async {
++  if (json && action == 'status') {
++    final failure = validateMachineSchemaRequest(
++      'hooks.status',
++      requestedSchemaVersion,
++      json: true,
++    );
++    if (failure != null) {
++      print(
++        failure
++            .withWorkspace(currentDirectory ?? Directory.current.path)
++            .encode(),
++      );
++      return failure.exitCode;
++    }
++  }
++  // In --json mode (status only) the human text is suppressed.
++  final say = json ? (Object? _) {} : print;
+   if (!{'install', 'uninstall', 'status'}.contains(action)) {
+-    print('Usage: dmc hooks <install|uninstall|status> --agent <agent>');
++    say('Usage: dmc hooks <install|uninstall|status> --agent <agent>');
+     return 2;
+   }
+   final agent = agentName == null ? null : HookAgent.fromId(agentName);
+   if (agent == null) {
+-    print('[DMC] Error: --agent must be muse-code or claude-code.');
++    say('[DMC] Error: --agent must be muse-code or claude-code.');
+     return 2;
+   }
+   HookScope scope;
+@@ -342,7 +362,7 @@ Future<int> runHooksCommand({
+   } else {
+     final match = HookScope.values.where((value) => value.name == scopeName);
+     if (match.isEmpty) {
+-      print('[DMC] Error: --scope must be project, local or user.');
++      say('[DMC] Error: --scope must be project, local or user.');
+       return 2;
+     }
+     scope = match.single;
+@@ -353,12 +373,12 @@ Future<int> runHooksCommand({
+       Platform.environment['HOME'] ??
+       Platform.environment['USERPROFILE'];
+   if (home == null) {
+-    print('[DMC] Error: Cannot find the home directory.');
++    say('[DMC] Error: Cannot find the home directory.');
+     return 1;
+   }
+   final root = findDmcWorkspace(currentDirectory ?? Directory.current.path);
+   if (scope != HookScope.user && root == null) {
+-    print(
++    say(
+       '[DMC] Error: No dmc workspace found here. Run "dmc init" first, or use --scope user.',
+     );
+     return 1;
+@@ -370,7 +390,7 @@ Future<int> runHooksCommand({
+     homePath: home,
+   );
+   if (configPath == null) {
+-    print(
++    say(
+       '[DMC] Error: ${agent.displayName} has no ${scope.name} hook scope. Use project or user.',
+     );
+     return 2;
+@@ -381,7 +401,7 @@ Future<int> runHooksCommand({
+     final exe = executable ?? Platform.resolvedExecutable;
+     final name = p.basenameWithoutExtension(exe).toLowerCase();
+     if (name == 'dart' || name == 'dartaotruntime') {
+-      print(
++      say(
+         '[DMC] Error: dmc is running under the Dart VM, so its executable path is unknown. Pass --dmc-command "<command that runs dmc>".',
+       );
+       return 2;
+@@ -402,26 +422,52 @@ Future<int> runHooksCommand({
+     }
+     config = decoded;
+   } on FormatException catch (error) {
+-    print(
++    say(
+       '[DMC] Error: $configPath is not valid JSON (${error.message}). Fix it by hand; nothing was changed.',
+     );
+     return 1;
+   }
+ 
+-  print('[DMC] ${agent.displayName} hooks (${scope.name} scope)');
+-  print('Config: $configPath${exists ? '' : ' (does not exist)'}');
+-  print('dmc command: $command');
++  say('[DMC] ${agent.displayName} hooks (${scope.name} scope)');
++  say('Config: $configPath${exists ? '' : ' (does not exist)'}');
++  say('dmc command: $command');
+   for (final note in _scopeNotes(agent, scope)) {
+-    print('Note: $note');
++    say('Note: $note');
+   }
+ 
+   if (action == 'status') {
+     final state = hookInstallState(config, agent, command);
++    if (json) {
++      final installed = state.values.every((value) => value);
++      print(
++        CommandResult(
++              command: 'hooks.status',
++              exitCode: installed ? 0 : 1,
++              data: {
++                'agent': agent.id,
++                'scope': scope.name,
++                'configPath': configPath,
++                'configExists': exists,
++                'dmcCommand': command,
++                'events': state,
++                'installed': installed,
++                'otherDmcCommands': otherDmcHookCommands(
++                  config,
++                  agent,
++                  command,
++                ),
++              },
++            )
++            .withWorkspace(root ?? currentDirectory ?? Directory.current.path)
++            .encode(),
++      );
++      return installed ? 0 : 1;
++    }
+     for (final entry in state.entries) {
+-      print('${entry.key}: ${entry.value ? 'installed' : 'missing'}');
++      say('${entry.key}: ${entry.value ? 'installed' : 'missing'}');
+     }
+     for (final other in otherDmcHookCommands(config, agent, command)) {
+-      print('Other dmc hook (not managed by this command): $other');
++      say('Other dmc hook (not managed by this command): $other');
+     }
+     return state.values.every((installed) => installed) ? 0 : 1;
+   }
+diff --git a/lib/src/hook_report.dart b/lib/src/hook_report.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4987af546e85b642fe55d8098550553fc758bd2
+--- /dev/null
++++ b/lib/src/hook_report.dart
+@@ -0,0 +1,185 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:path/path.dart' as p;
++
++import 'agent_hooks.dart';
++import 'hook_installer.dart';
++
++/// dmc's hook entries wherever the installer can write them: used by
++/// `dmc disable` and `dmc doctor`. Read-only, apart from
++/// [writeHookConfigFile].
++
++/// One hook config file the installer supports.
++class HookLocation {
++  final HookAgent agent;
++  final HookScope scope;
++  final String path;
++
++  const HookLocation(this.agent, this.scope, this.path);
++}
++
++/// Every (agent, scope) config file the installer supports. Workspace
++/// scopes are included only when [workspaceRoot] is known.
++List<HookLocation> hookLocations({
++  required String? workspaceRoot,
++  required String homePath,
++}) => [
++  for (final agent in HookAgent.values)
++    for (final scope in HookScope.values)
++      if (workspaceRoot != null || scope == HookScope.user)
++        if (hookConfigPath(
++              agent,
++              scope,
++              workspaceRoot: workspaceRoot,
++              homePath: homePath,
++            )
++            case final path?)
++          HookLocation(agent, scope, path),
++];
++
++/// A hook config file as read: its text and JSON, or why it could not be
++/// used.
++class HookConfigFile {
++  final HookLocation location;
++  final bool exists;
++  final String text;
++  final Map<String, Object?>? config;
++  final String? error;
++
++  const HookConfigFile(
++    this.location, {
++    required this.exists,
++    required this.text,
++    this.config,
++    this.error,
++  });
++}
++
++HookConfigFile readHookConfigFile(HookLocation location) {
++  final file = File(location.path);
++  if (!file.existsSync()) {
++    return HookConfigFile(location, exists: false, text: '', config: {});
++  }
++  final text = file.readAsStringSync();
++  try {
++    final decoded = text.trim().isEmpty
++        ? <String, Object?>{}
++        : jsonDecode(text);
++    if (decoded is! Map<String, Object?>) {
++      return HookConfigFile(
++        location,
++        exists: true,
++        text: text,
++        error: 'not a JSON object',
++      );
++    }
++    return HookConfigFile(location, exists: true, text: text, config: decoded);
++  } on FormatException catch (error) {
++    return HookConfigFile(
++      location,
++      exists: true,
++      text: text,
++      error: 'not valid JSON (${error.message})',
++    );
++  }
++}
++
++/// One dmc-owned handler: a command of the form
++/// `<dmc command> agent-hook <agent> <event>` under that event.
++class DmcHookEntry {
++  final HookLocation location;
++  final String event;
++  final String command;
++
++  /// The part before ` agent-hook`: the dmc that the hook runs.
++  final String dmcCommand;
++  final bool async;
++
++  const DmcHookEntry({
++    required this.location,
++    required this.event,
++    required this.command,
++    required this.dmcCommand,
++    required this.async,
++  });
++
++  Map<String, Object?> toJson() => {
++    'agent': location.agent.id,
++    'scope': location.scope.name,
++    'configPath': location.path,
++    'event': event,
++    'command': command,
++    'dmcCommand': dmcCommand,
++    'async': async,
++  };
++}
++
++/// dmc's own handlers in [file]: commands that end in
++/// ` agent-hook <this agent> <this event>`. Other tools' hooks never match.
++List<DmcHookEntry> dmcHookEntries(HookConfigFile file) {
++  final hooks = file.config?['hooks'];
++  if (hooks is! Map<String, Object?>) return const [];
++  final agent = file.location.agent;
++  final entries = <DmcHookEntry>[];
++  for (final event in hooks.entries) {
++    final groups = event.value;
++    if (groups is! List<Object?>) continue;
++    final suffix = ' agent-hook ${agent.id} ${event.key}';
++    for (final group in groups) {
++      if (group is! Map<String, Object?>) continue;
++      final handlers = group['hooks'];
++      if (handlers is! List<Object?>) continue;
++      for (final handler in handlers.whereType<Map<String, Object?>>()) {
++        final command = handler['command'];
++        if (command is! String || !command.endsWith(suffix)) continue;
++        final dmcCommand = command
++            .substring(0, command.length - suffix.length)
++            .trim();
++        if (dmcCommand.isEmpty) continue;
++        entries.add(
++          DmcHookEntry(
++            location: file.location,
++            event: event.key,
++            command: command,
++            dmcCommand: dmcCommand,
++            async: handler['async'] == true,
++          ),
++        );
++      }
++    }
++  }
++  return entries;
++}
++
++/// The executable a hook's dmc command runs, when it is one (possibly
++/// single-quoted) path; null for commands such as `dart run …/dmc.dart`.
++String? hookExecutablePath(String dmcCommand) {
++  final text = dmcCommand.trim();
++  if (text.startsWith("'") && text.endsWith("'") && text.length > 1) {
++    return text.substring(1, text.length - 1).replaceAll("'\\''", "'");
++  }
++  if (text.contains(' ')) return null;
++  return text;
++}
++
++/// The command this dmc writes into hooks (as `dmc hooks install` does).
++String currentHookCommand({String? executable}) => shellQuote(
++  p.normalize(p.absolute(executable ?? Platform.resolvedExecutable)),
++);
++
++/// Write [after] for [file] in its original layout; a config left empty is
++/// one dmc created, so the file is removed. Returns true when it was removed.
++bool writeHookConfigFile(HookConfigFile file, Map<String, Object?> after) {
++  final target = File(file.location.path);
++  if (after.isEmpty) {
++    if (target.existsSync()) target.deleteSync();
++    return true;
++  }
++  final text = encodeHookConfig(after, original: file.text);
++  target.parent.createSync(recursive: true);
++  final temporary = File('${file.location.path}.dmc-tmp');
++  temporary.writeAsStringSync(text, flush: true);
++  temporary.renameSync(file.location.path);
++  return false;
++}
+diff --git a/test/disable_test.dart b/test/disable_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..0118228dd9b8049feab9423784463af9a4727fbe
+--- /dev/null
++++ b/test/disable_test.dart
+@@ -0,0 +1,224 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:dmc/dmc.dart';
++import 'package:path/path.dart' as p;
++import 'package:test/test.dart';
++
++const dmcCommand = '/opt/dmc/bin/dmc';
++
++void main() {
++  late Directory sandbox;
++  late Directory root;
++  late Directory home;
++
++  setUp(() async {
++    sandbox = Directory.systemTemp.createTempSync('dmc_disable_');
++    root = Directory(p.join(sandbox.path, 'project'))..createSync();
++    home = Directory(p.join(sandbox.path, 'home'))..createSync();
++    await initDmc(basePath: root.path);
++  });
++
++  tearDown(() {
++    if (sandbox.existsSync()) sandbox.deleteSync(recursive: true);
++  });
++
++  Future<({int code, List<String> output})> capture(
++    Future<int> Function() body,
++  ) async {
++    final output = <String>[];
++    final code = await runZoned(
++      body,
++      zoneSpecification: ZoneSpecification(
++        print: (_, _, _, message) => output.add(message),
++      ),
++    );
++    return (code: code, output: output);
++  }
++
++  Future<int> install(String agent, {String command = dmcCommand}) async =>
++      (await capture(
++        () => runHooksCommand(
++          action: 'install',
++          agentName: agent,
++          apply: true,
++          dmcCommand: command,
++          currentDirectory: root.path,
++          homePath: home.path,
++        ),
++      )).code;
++
++  Future<({int code, List<String> output})> disable({
++    bool apply = false,
++    bool json = false,
++  }) => capture(
++    () => runDisableCommand(
++      apply: apply,
++      json: json,
++      requestedSchemaVersion: json ? '1' : null,
++      currentDirectory: root.path,
++      homePath: home.path,
++    ),
++  );
++
++  File claudeLocal() =>
++      File(p.join(root.path, '.claude', 'settings.local.json'));
++  File museUser() =>
++      File(p.join(home.path, '.config', 'muse', 'settings.json'));
++
++  /// Every file under .dmc with its bytes: history and checkpoints.
++  Map<String, String> vault() => {
++    for (final entity in Directory(
++      p.join(root.path, '.dmc'),
++    ).listSync(recursive: true))
++      if (entity is File)
++        p.relative(entity.path, from: root.path): base64Encode(
++          entity.readAsBytesSync(),
++        ),
++  };
++
++  // Another tool's hooks, and Muse settings that are not hooks.
++  const museOriginal =
++      '{\n    "model": "muse-wonder-1.0",\n    "hooks": {\n        "Stop": [\n            {\n                "matcher": "*",\n                "hooks": [\n                    {\n                        "type": "command",\n                        "command": "echo other-tool"\n                    }\n                ]\n            }\n        ]\n    }\n}\n';
++
++  test(
++    'preview lists only dmc hooks and changes nothing; apply removes '
++    'them, keeps other hooks, restores the bytes and keeps history',
++    () async {
++      museUser()
++        ..createSync(recursive: true)
++        ..writeAsStringSync(museOriginal);
++      expect(await install('claude-code'), 0);
++      expect(await install('muse-code'), 0);
++      // A hook from another dmc build in the same file.
++      final claude =
++          jsonDecode(claudeLocal().readAsStringSync()) as Map<String, Object?>;
++      ((claude['hooks'] as Map)['Stop'] as List).add({
++        'matcher': '*',
++        'hooks': [
++          {
++            'type': 'command',
++            'command': '/old/dmc agent-hook claude-code Stop',
++          },
++        ],
++      });
++      claudeLocal().writeAsStringSync(
++        const JsonEncoder.withIndent('  ').convert(claude),
++      );
++      final service = CheckpointService(
++        basePath: root.path,
++        homePath: home.path,
++      );
++      final begin = await service.begin(label: 'kept');
++      File(p.join(root.path, 'a.txt')).writeAsStringSync('a');
++      await service.close(((begin.data['checkpoint'] as Map)['id']) as String);
++      final history = vault();
++      final claudeBefore = claudeLocal().readAsStringSync();
++      final museBefore = museUser().readAsStringSync();
++
++      final preview = await disable();
++      expect(preview.code, 0, reason: preview.output.join('\n'));
++      final text = preview.output.join('\n');
++      expect(text, contains('Claude Code (local): ${claudeLocal().path}'));
++      expect(
++        text,
++        contains('  - Stop: $dmcCommand agent-hook claude-code Stop'),
++      );
++      expect(text, contains('  - Stop: /old/dmc agent-hook claude-code Stop'));
++      expect(text, contains('Muse Code (user): ${museUser().path}'));
++      expect(
++        text,
++        contains('  - Interrupt: $dmcCommand agent-hook muse-code Interrupt'),
++      );
++      expect(text, contains('serve every dmc workspace'));
++      expect(text, contains('Watcher: not running'));
++      expect(text, isNot(contains('echo other-tool')));
++      expect(text, contains('Preview only'));
++      expect(claudeLocal().readAsStringSync(), claudeBefore);
++      expect(museUser().readAsStringSync(), museBefore);
++
++      final applied = await disable(apply: true);
++      expect(applied.code, 0, reason: applied.output.join('\n'));
++      // dmc created the Claude file, so it goes; Muse's is back to its bytes.
++      expect(claudeLocal().existsSync(), isFalse);
++      expect(museUser().readAsStringSync(), museOriginal);
++      expect(applied.output.join('\n'), contains('dmc hooks install'));
++      // History and checkpoints are untouched.
++      expect(vault(), history);
++      expect((await service.list()).data['checkpoints'], hasLength(1));
++
++      // Idempotent.
++      final again = await disable(apply: true);
++      expect(again.code, 0);
++      expect(again.output.join('\n'), contains('Nothing to disable.'));
++      expect(museUser().readAsStringSync(), museOriginal);
++      expect(vault(), history);
++    },
++  );
++
++  test('--json reports the hooks, the watcher and the kept history', () async {
++    expect(await install('claude-code'), 0);
++    final preview = await disable(json: true);
++    expect(preview.code, 0);
++    final envelope = jsonDecode(preview.output.single) as Map;
++    expect(envelope['command'], 'disable');
++    expect(envelope['schemaVersion'], 1);
++    final data = envelope['data'] as Map;
++    expect(data['mode'], 'preview');
++    expect((data['hooks'] as List).map((h) => (h as Map)['event']), [
++      'UserPromptSubmit',
++      'Stop',
++      'StopFailure',
++      'SessionEnd',
++    ]);
++    expect((data['hooks'] as List).first, containsPair('agent', 'claude-code'));
++    expect(data['watcher'], {'running': false, 'stopped': false});
++    expect(data['historyKept'], isTrue);
++    expect(claudeLocal().existsSync(), isTrue);
++
++    final applied = await disable(json: true, apply: true);
++    final appliedData =
++        (jsonDecode(applied.output.single) as Map)['data'] as Map;
++    expect(appliedData['mode'], 'apply');
++    expect(appliedData['removedConfigFiles'], [claudeLocal().path]);
++    expect(claudeLocal().existsSync(), isFalse);
++  });
++
++  test('outside a workspace only user-scope hooks are checked', () async {
++    expect(await install('muse-code'), 0);
++    final outside = Directory(p.join(sandbox.path, 'elsewhere'))..createSync();
++    final result = await capture(
++      () => runDisableCommand(
++        apply: true,
++        currentDirectory: outside.path,
++        homePath: home.path,
++      ),
++    );
++    expect(result.code, 0);
++    expect(result.output.join('\n'), contains('only user-scope hooks'));
++    expect(museUser().existsSync(), isFalse);
++  });
++
++  test('hooks status --json reports each event', () async {
++    expect(await install('claude-code'), 0);
++    final result = await capture(
++      () => runHooksCommand(
++        action: 'status',
++        agentName: 'claude-code',
++        dmcCommand: dmcCommand,
++        currentDirectory: root.path,
++        homePath: home.path,
++        json: true,
++        requestedSchemaVersion: '1',
++      ),
++    );
++    expect(result.code, 0);
++    final data = (jsonDecode(result.output.single) as Map)['data'] as Map;
++    expect(data['agent'], 'claude-code');
++    expect(data['scope'], 'local');
++    expect(data['installed'], isTrue);
++    expect((data['events'] as Map)['Stop'], isTrue);
++    expect(data['otherDmcCommands'], isEmpty);
++  });
++}

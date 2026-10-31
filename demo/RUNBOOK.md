@@ -23,19 +23,34 @@ alias doc="$PWD/build/doc"
 dart run demo/make_demo_repo.dart /tmp/doc-demo        # asks before installing both agents' hooks
 cd /tmp/doc-demo
 python3 -m unittest -q                                 # 6 tests, OK
+doc doctor                                             # every line should be "ok" (each problem shows its fix)
 ```
+
+`doc doctor` checks:
+
+- dmc and the demo workspace;
+- both agents' hooks;
+- each key (never its value) and its roles;
+- the Modal endpoint;
+- the microphone tool;
+- Muse Code's model, with the estimated cost of a timelines run.
+
+It makes no model calls.
 
 - Keys: `MODEL_API_KEY` (Meta: Muse Spark, Wonder, Voice), `BASETEN_API_KEY`, and
   `MODAL_GLIMMER_KEY` with `DOC_MODAL_BASE_URL`, all in `~/.zshrc`. Never show them on screen.
-- **Muse Code's model:** Mike's Muse Code defaults to `muse-wonder-1.0` with high reasoning
-  (`~/.config/muse/settings.json`). With that, three timeline agents cost about $0.80. Add
-  `--agent-model muse-spark-1.3-contributor` to `doc timelines` for a run of about $0.01. Doc's
-  estimate names the model it will use.
+- **The agents' model for the video is Muse Code's configured default:** `muse-wonder-1.0` with
+  high reasoning (Mike's choice). It costs about $0.80 per timelines run. Doc's estimate and
+  question name it ("Run 3 Muse Code agents (muse-wonder-1.0) …").
+  - For rehearsals, add `--agent-model muse-spark-1.3-contributor`, about $0.01 per run. Those
+    agents are weaker: in one rehearsal one of them hit a Meta `server_error`.
 - Muse Code workspace trust is not needed: the hooks are user scope, and `muse exec` edits files
   with its default approval and sandbox.
-- **Warm Glimmer about 2 minutes before you start recording:** `doc models --check`. A cold start
-  took 113 s. Glimmer scales to zero after 5 idle minutes, so warm it again if the lesson step is
-  more than 5 minutes later.
+- **Warm Glimmer about 2 minutes before you start recording:** `doc doctor --check`.
+  - It sends one tiny prompt to each provider and says "if Glimmer is cold, the first call takes
+    about 2 minutes". A cold start took 91–113 s.
+  - Glimmer scales to zero after 5 idle minutes, so warm it again if the lesson step is more than
+    5 minutes later.
 
 ## The scripted agent turns (record or pre-run, about 90 s)
 
@@ -82,9 +97,15 @@ What to point at:
   - Muse Wonder's three approaches;
   - the cost estimate and one question;
   - three worktrees outside the repo, three agents in parallel, each with tests;
-  - the side-by-side comparison;
-  - "**Wonder recommends timeline k: …**" with the ranking, risks and "Advice only: nothing was
-    applied."
+  - "Asking Muse Wonder to judge the timelines…", then the side-by-side comparison, where each
+    timeline has a "**did (per Wonder):** …" line;
+  - "**Wonder recommends timeline k: …**" and the ranking. Each entry shows "**Planned:** <the
+    approach> / **Did:** <what the diff really does>", with the rationale and risks. A timeline
+    whose diff did something else is flagged "**DIDN'T FOLLOW ITS PLAN**"; Wonder judges this
+    and Doc never changes the scores. Then "Advice only: nothing was applied."
+  - Point at this: an agent can solve the task another way than its approach. In a real run,
+    "Migrate checkout callers" actually changed `apply_discount` instead, and Planned / Did
+    makes that visible.
 - **Step 4** shows the diff and writes the patch to Doc's data dir. **Doc runs nothing in the
   repository**; the other timelines stay as branches.
 - **Step 5:** `doc restore` is **not** needed here, because no later turn touched `money.py`, so
@@ -115,25 +136,49 @@ Voice notes:
 - With no microphone or SoX/ffmpeg, `doc talk --file <recording.wav>` streams a recording
   instead.
 
+## If something goes wrong on camera (30 seconds)
+
+- **Glimmer is cold** (the brief or a summary hangs, and "Waking Muse Glimmer on Modal…" shows).
+  Wait: it answers in about 90 seconds. If it fails, Doc prints `FALLBACK: role "summary" failed
+  on modal … Using the configured fallback baseten`, and Muse Spark Open writes the brief.
+  - Say: "Glimmer runs on my own GPU that scales to zero; when it's cold, Doc falls back to Muse
+    Spark and says so."
+- **An agent hits its step limit or fails.** Its block says "step limit" (or the agent error) and
+  its tests run anyway. Wonder ranks it, flags it if it changed nothing, and can't recommend it if
+  its tests failed. Pick another timeline.
+  - If none passed: `doc timelines judge <run-id>` re-judges a saved run, or re-run with
+    `--max-steps 15`.
+- **dmc reports a conflict** (`workspace_drift` in a restore preview). A file changed after that
+  turn. Doc changed nothing and says so; that is the safety net working.
+  - Say: "dmc won't overwrite work it didn't record."
+  - Then `git apply` the picked patch instead, or undo the later edit and run the restore again.
+- **A hook isn't firing** (no new checkpoint after a turn): run `doc doctor`. It names the problem
+  (for example a hook pointing at another dmc build) and the fix.
+
 ## Afterwards
 
 ```sh
 cd /tmp/doc-demo
-"$DMC_BIN" hooks uninstall --agent claude-code --apply
-"$DMC_BIN" hooks uninstall --agent muse-code --apply      # puts ~/.config/muse/settings.json back
-doc timelines clean <run-id>                              # worktree folders; branches stay in /tmp/doc-demo
+"$DMC_BIN" disable --apply        # removes only dmc's hooks (both agents) and stops the watcher; history stays
+doc timelines clean <run-id>      # worktree folders; branches stay in /tmp/doc-demo
 rm -rf /tmp/doc-demo
 ```
+
+`dmc disable` (without `--apply`) previews exactly which hook entries it would remove. Muse
+Code's `~/.config/muse/settings.json` goes back to its exact bytes.
 
 ## Measured (2026-10-31, Mike's Mac)
 
 | Step | Wall time | Cost |
 |---|---|---|
 | `make_demo_repo.dart` | about 1 s | none |
-| `doc models --check` (Glimmer cold) | 121 s (Glimmer 113 s) | Meta/Baseten/Fireworks about $0.002 plus Modal GPU time |
+| `doc doctor` | under 1 s | none |
+| `doc doctor --check` (Glimmer cold) | 96 s (Glimmer 91 s) | Meta/Baseten/Fireworks about $0.002 plus Modal GPU time |
+| `doc models --check` (Glimmer cold; the older warm-up) | 121 s (Glimmer 113 s) | the same |
 | 4 agent turns | 19 + 36 + 15 + 17 s | Claude Code subscription; Muse Code on its own account |
 | `doc bisect` (4 probes and the explanation) | 2 s | Baseten $0.0028 |
 | `doc timelines --from-bisect` (3 agents on `muse-wonder-1.0`, 7/7/10 steps, then judging) | 66 s (agents 48 s) | Muse Code $0.81, Wonder planner $0.026, Wonder judge $0.026 |
+| the same with `--agent-model muse-spark-1.3-contributor` (rehearsal, 6/8/3 steps; one agent hit a `server_error`) | 66 s (agents 51 s) | Muse Code $0.012, Wonder planner $0.023, Wonder judge $0.024 |
 | `doc timelines pick` | under 1 s | none |
 | `git apply`, `python3 -m unittest -v` | under 1 s | none |
 | `doc lesson draft` | 2 s | Baseten $0.0029 |
