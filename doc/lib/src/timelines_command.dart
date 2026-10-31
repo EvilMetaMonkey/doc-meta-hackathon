@@ -142,7 +142,7 @@ Future<int> runTimelinesCommand(DocContext context, TimelineDeps deps) async {
 }
 
 const String _usage =
-    'Usage: doc timelines "<task>" --test "<command>" [--from <checkpoint> --state before|after | --from-bisect] [--n 3] [--setup "<command>"] [--link <dir>]... [--max-steps <n>] [--timeout <minutes>] [--no-judge] [--yes] [--json]\n'
+    'Usage: doc timelines "<task>" --test "<command>" [--from <checkpoint> --state before|after | --from-bisect] [--n 3] [--setup "<command>"] [--link <dir>]... [--max-steps <n>] [--timeout <minutes>] [--agent-model <id>] [--no-judge] [--yes] [--json]\n'
     '       doc timelines list | show <run-id> | judge <run-id> | pick <run-id> <k> | clean <run-id>';
 
 Future<int> _run(DocContext context, TimelineDeps deps) async {
@@ -470,20 +470,45 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     'muse-code',
   ], workingDirectory: root);
   final hooksOn = hooks.exitCode == 0;
+  // The agents' model: --agent-model, else Muse Code's configured default.
+  final agentModel = (args['agent-model'] as String?)?.trim();
+  final configured = agentModel == null || agentModel.isEmpty
+      ? museConfiguredModel(_museSettings(context.env))
+      : null;
+  final model = (agentModel != null && agentModel.isNotEmpty)
+      ? agentModel
+      : configured;
+  final perStep =
+      '$n agent(s) × $maxSteps step(s) × ~${museInputTokensPerStep ~/ 1000}k input + $museOutputTokensPerStep output tokens per step '
+      '(measured with muse exec 1.4.14), with no cache discount (real runs are usually far lower: most input is cached)';
+  final single = model == null
+      ? null
+      : estimateTimelineCostFor(n, maxSteps, model);
   final estimate = estimateTimelineCost(n, maxSteps);
+  final String costText;
   say('');
-  say(
-    'Estimate: at most \$${estimate.contributor.toStringAsFixed(2)} in Contributor mode (muse-spark-1.3-contributor, what Muse Code used on this Mac) '
-    'or \$${estimate.standard.toStringAsFixed(2)} in Standard mode: $n agent(s) × $maxSteps step(s) × ~${museInputTokensPerStep ~/ 1000}k input + $museOutputTokensPerStep output tokens per step '
-    '(measured with muse exec 1.4.14), with no cache discount. Muse Code bills its own Meta account; Doc reads the real tokens afterwards.',
-  );
+  if (single != null) {
+    costText = '≤ \$${single.toStringAsFixed(2)}';
+    say(
+      'Estimate: at most \$${single.toStringAsFixed(2)} on $model (${agentModel != null && agentModel.isNotEmpty ? '--agent-model' : 'Muse Code\'s configured model'}): $perStep. '
+      'Muse Code bills its own Meta account; Doc reads the real tokens afterwards. Use --agent-model muse-spark-1.3-contributor for the cheapest run.',
+    );
+  } else {
+    costText =
+        '≤ \$${estimate.contributor.toStringAsFixed(2)}–\$${estimate.standard.toStringAsFixed(2)}';
+    say(
+      'Estimate: at most \$${estimate.contributor.toStringAsFixed(2)} in Contributor mode (muse-spark-1.3-contributor) '
+      'or \$${estimate.standard.toStringAsFixed(2)} in Standard mode (muse-spark-1.3)${model == null ? '' : '; no price is known for $model'}: $perStep. '
+      'Muse Code bills its own Meta account; Doc reads the real tokens afterwards.',
+    );
+  }
   if (!hooksOn) {
     say(
       'Muse Code\'s user-scope dmc hooks are not installed (dmc hooks status --agent muse-code), so the timelines run without per-turn checkpoints.',
     );
   }
   final question =
-      'Run $n Muse Code agents in separate worktrees (max $maxSteps steps, $timeoutMinutes min each, est. cost ≤ \$${estimate.contributor.toStringAsFixed(2)}–\$${estimate.standard.toStringAsFixed(2)})? [y/N] ';
+      'Run $n Muse Code agents${model == null ? '' : ' ($model)'} in separate worktrees (max $maxSteps steps, $timeoutMinutes min each, est. cost $costText)? [y/N] ';
   bool agreed;
   if (yes) {
     say('${question}yes (--yes)');
@@ -648,6 +673,10 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
           '$maxSteps',
           '--disable-web-tools',
           '--json',
+          if (agentModel != null && agentModel.isNotEmpty) ...[
+            '--model',
+            agentModel,
+          ],
         ],
         workingDirectory: t.worktree,
         environment: context.env,
@@ -1195,4 +1224,23 @@ Future<bool> _judge(
     'Advice only: nothing was applied. Pick with doc timelines pick ${run.id} <k>.',
   );
   return true;
+}
+
+/// Muse Code's user settings (read-only, for its default model):
+/// `$XDG_CONFIG_HOME/muse/settings.json`, else `~/.config/muse/settings.json`.
+String? _museSettings(Map<String, String> env) {
+  final xdg = env['XDG_CONFIG_HOME'];
+  final home = env['HOME'] ?? env['USERPROFILE'];
+  final path = xdg != null && xdg.isNotEmpty
+      ? p.join(xdg, 'muse', 'settings.json')
+      : home == null
+      ? null
+      : p.join(home, '.config', 'muse', 'settings.json');
+  if (path == null) return null;
+  final file = File(path);
+  try {
+    return file.existsSync() ? file.readAsStringSync() : null;
+  } on FileSystemException {
+    return null;
+  }
 }

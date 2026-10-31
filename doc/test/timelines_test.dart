@@ -182,6 +182,21 @@ void main() {
     );
   });
 
+  test('the estimate uses the agents\' real model', () {
+    expect(
+      estimateTimelineCostFor(3, 10, 'muse-wonder-1.0'),
+      closeTo(3 * 10 * (30000 * 4.00 + 600 * 20.00) / 1e6, 1e-9),
+    );
+    expect(estimateTimelineCostFor(3, 10, 'some-new-model'), isNull);
+    expect(
+      museConfiguredModel('{"provider":"meta","model":"muse-wonder-1.0"}'),
+      'muse-wonder-1.0',
+    );
+    expect(museConfiguredModel('{"provider":"meta"}'), isNull);
+    expect(museConfiguredModel('not json'), isNull);
+    expect(museConfiguredModel(null), isNull);
+  });
+
   test('parseNumstat', () {
     expect(
       parseNumstat(

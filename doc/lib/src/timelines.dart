@@ -363,6 +363,30 @@ double? museCostUsd(MuseOutcome outcome) {
 const int museInputTokensPerStep = 30000;
 const int museOutputTokensPerStep = 600;
 
+/// The upper estimate for [n] agents of at most [maxSteps] steps each on
+/// [model], with no cache discount, or null when its price is unknown.
+double? estimateTimelineCostFor(int n, int maxSteps, String model) {
+  final price = museModelPrices[model];
+  if (price == null) return null;
+  return n *
+      maxSteps *
+      (museInputTokensPerStep * price.$1 + museOutputTokensPerStep * price.$3) /
+      1e6;
+}
+
+/// The model Muse Code uses by default: `model` in its user settings
+/// ([settingsJson], from `~/.config/muse/settings.json`), or null.
+String? museConfiguredModel(String? settingsJson) {
+  if (settingsJson == null) return null;
+  try {
+    final json = jsonDecode(settingsJson);
+    final model = json is Map ? json['model'] : null;
+    return model is String && model.trim().isNotEmpty ? model.trim() : null;
+  } on FormatException {
+    return null;
+  }
+}
+
 /// Upper estimates for [n] agents of at most [maxSteps] steps each, in
 /// Contributor and Standard mode (Muse Spark 1.3 prices).
 ({double contributor, double standard}) estimateTimelineCost(

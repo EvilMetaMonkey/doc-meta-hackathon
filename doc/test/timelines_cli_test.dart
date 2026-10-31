@@ -826,4 +826,69 @@ void main() {
     expect((timelines[0]['test'] as Map)['passed'], isTrue);
     expect((timelines[1]['test'] as Map)['passed'], isFalse);
   });
+
+  test('the estimate names Muse Code\'s configured model; --agent-model '
+      'overrides it and reaches the agents', () async {
+    File(p.join(home.path, '.config', 'muse', 'settings.json'))
+      ..createSync(recursive: true)
+      ..writeAsStringSync('{"provider":"meta","model":"muse-wonder-1.0"}');
+    await planner(
+      plan([('Put the value back', 'FAKE-FIX'), ('Write notes', 'FAKE-WRONG')]),
+    );
+    answers.add('n');
+    expect(
+      await doc([
+        'timelines',
+        'fix it',
+        '--test',
+        goodTest,
+        '--n',
+        '2',
+        '--max-steps',
+        '4',
+      ]),
+      0,
+      reason: '$err',
+    );
+    expect(
+      '$out',
+      contains(
+        'Estimate: at most \$1.06 on muse-wonder-1.0 (Muse Code\'s configured model)',
+      ),
+    );
+    expect(
+      '$out',
+      contains(
+        'Run 2 Muse Code agents (muse-wonder-1.0) in separate worktrees',
+      ),
+    );
+
+    out.clear();
+    expect(
+      await doc([
+        'timelines',
+        'fix it',
+        '--test',
+        goodTest,
+        '--n',
+        '2',
+        '--max-steps',
+        '4', //
+        '--agent-model', 'muse-spark-1.3-contributor', '--yes', '--no-judge',
+      ]),
+      0,
+      reason: '$err',
+    );
+    expect('$out', contains('on muse-spark-1.3-contributor (--agent-model)'));
+    for (final entry in Directory(museLog).listSync()) {
+      final args =
+          ((jsonDecode(File(entry.path).readAsStringSync()) as Map)['args']
+                  as List)
+              .cast<String>();
+      expect(
+        args,
+        containsAllInOrder(['--model', 'muse-spark-1.3-contributor']),
+      );
+    }
+  });
 }
