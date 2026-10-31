@@ -338,6 +338,8 @@ void main() {
                 'score': score,
                 'rationale': why,
                 'risks': ['a risk'],
+                'followed_plan': k == 2 ? 'no' : 'yes',
+                'actual_change': 'Did thing $k.',
               },
           ],
           'recommended': recommended,
@@ -356,19 +358,107 @@ void main() {
       );
       expect(judgment.recommended, 1);
       expect(judgment.ranking.map((e) => e.k), [1, 2, 3]);
+      expect(judgment.ranking[1].followedPlan, 'no');
       expect(timelineJudgmentLines(run, judgment), [
         'Wonder recommends timeline 1: Fix helper — Timeline one is the smallest correct fix.',
         'Ranking (advice only; you pick):',
         '  1. [1] Fix helper  9/10',
+        '     Planned: Fix helper',
+        '     Did: Did thing 1.',
         '     Minimal and correct.',
         '     Risks: a risk',
-        '  2. [2] Round callers  4/10',
+        "  2. [2] Round callers  4/10  — DIDN'T FOLLOW ITS PLAN",
+        '     Planned: Round callers',
+        '     Did: Did thing 2.',
         '     Bigger.',
         '     Risks: a risk',
         '  3. [3] Decimal (no changes)  1/10',
+        '     Planned: Decimal',
+        '     Did: Did thing 3.',
         '     Nothing.',
         '     Risks: a risk',
       ]);
+      // The comparison shows what each diff did, and flags the stray one.
+      run.judgment = judgment.toJson();
+      final table = timelineComparison(run);
+      expect(table, contains('    did (per Wonder): Did thing 1.'));
+      expect(
+        table,
+        contains(
+          "    did (per Wonder): Did thing 2.  ← didn't follow its plan",
+        ),
+      );
+    });
+
+    test('a recommended timeline that strayed from its plan is noted; plan '
+        'fields are validated; old judgments still show', () {
+      final run = sampleRun();
+      String one(Map<String, Object?> extra) => jsonEncode({
+        'ranking': [
+          for (final k in [1, 2, 3])
+            {
+              'k': k,
+              'score': 5,
+              'rationale': 'r',
+              'risks': <String>[],
+              'followed_plan': 'yes',
+              'actual_change': 'Changed it.',
+              if (k == 1) ...extra,
+            },
+        ],
+        'recommended': 1,
+        'summary': 's',
+      });
+      final judgment = parseTimelineJudgment(
+        one({
+          'followed_plan': 'partly',
+          'actual_change': 'Restored percents in apply_discount instead.',
+        }),
+        run,
+      );
+      expect(
+        timelineJudgmentLines(run, judgment)[1],
+        'Note: timeline 1 only partly followed its plan. Planned: Fix helper. Did: Restored percents in apply_discount instead.',
+      );
+      expect(
+        () => parseTimelineJudgment(one({'followed_plan': 'maybe'}), run),
+        throwsA(
+          isA<TimelineJudgeRefused>().having(
+            (e) => e.message,
+            'm',
+            contains('"followed_plan"'),
+          ),
+        ),
+      );
+      expect(
+        () => parseTimelineJudgment(
+          one({'actual_change': List.filled(26, 'w').join(' ')}),
+          run,
+        ),
+        throwsA(
+          isA<TimelineJudgeRefused>().having(
+            (e) => e.message,
+            'm',
+            contains('at most 25'),
+          ),
+        ),
+      );
+      expect(
+        () => parseTimelineJudgment(one({'actual_change': ' '}), run),
+        throwsA(isA<TimelineJudgeRefused>()),
+      );
+      // A judgment saved before plan adherence was asked has no Planned/Did.
+      final old = TimelineJudgment.fromJson({
+        'ranking': [
+          {'k': 1, 'score': 9, 'rationale': 'ok', 'risks': []},
+        ],
+        'recommended': 1,
+        'summary': 's',
+      });
+      expect(
+        timelineJudgmentLines(run, old).join('\n'),
+        isNot(contains('Did:')),
+      );
     });
 
     test(

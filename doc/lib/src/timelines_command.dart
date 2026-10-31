@@ -869,7 +869,15 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     ..seconds = clock.elapsedMilliseconds / 1000;
   _save(context, active);
 
-  // 7. Compare.
+  // 7–8. Wonder's judgment (advice only), then the comparison, which shows
+  // what each diff really did, then the judgment.
+  final judgmentLines = <String>[];
+  if (!interrupted && !(args['no-judge'] as bool)) {
+    say('');
+    say('Asking Muse Wonder to judge the timelines…');
+    await _judge(context, active, judgmentLines.add);
+    _save(context, active);
+  }
   say('');
   say(
     'Run $runId (${clockText(active.seconds)} wall time). Base: $baseId $state.',
@@ -884,11 +892,9 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   say(
     'Muse Code: \$${spent.toStringAsFixed(4)} (from each run\'s reported tokens); planner: \$${plannerCost.toStringAsFixed(4)}.',
   );
-  // 8. Wonder's judgment: advice only.
-  if (!interrupted && !(args['no-judge'] as bool)) {
+  if (judgmentLines.isNotEmpty) {
     say('');
-    await _judge(context, active, say);
-    _save(context, active);
+    judgmentLines.forEach(say);
   }
   say(
     interrupted
@@ -1101,12 +1107,14 @@ Future<int> _judgeCommand(DocContext context) async {
   final run = _load(context, rest[2]);
   final json = context.args['json'] as bool;
   void say(String line) => json ? context.log(line) : context.out.writeln(line);
+  final lines = <String>[];
+  final judged = await _judge(context, run, lines.add);
+  _save(context, run);
   for (final line in timelineComparison(run)) {
     say(line);
   }
   say('');
-  final judged = await _judge(context, run, say);
-  _save(context, run);
+  lines.forEach(say);
   if (json) context.out.writeln(jsonEncode(run.toJson()));
   return judged ? 0 : 1;
 }
