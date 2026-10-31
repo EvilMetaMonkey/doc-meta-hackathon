@@ -632,7 +632,12 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 ## In progress
 
-- Nothing yet.
+- PR #2 (`polish`) CI: on `7b41f91`, ubuntu, macos-latest and macos-15-intel passed in both the
+  push and pull_request runs; windows-latest failed 3 `hook_doctor` tests (no execute bit on
+  Windows). Patch 0035 fixes it, and locally a clean `setup_dmc` applied 35/35, dmc ran 234 tests
+  and 3 contract tests and Doc 187. Pushing it was refused (HTTP 403, "You must verify your email
+  address" on the GitHub account), so CI has not run on the fix yet. Next: verify the email at
+  https://github.com/settings/emails, push `polish` and wait for CI on all four platforms.
 
 ## Broken
 
