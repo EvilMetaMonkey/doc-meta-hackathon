@@ -40,7 +40,8 @@ every commit is dated 2026-10-26 or later.
 
 - **Doc** ([`doc/`](doc/)), the companion that runs every model call:
   - `doc bisect`, time-travel bisect over agent-turn checkpoints;
-  - `doc timelines`, parallel Muse Code timelines in Git worktrees, planned by Muse Wonder;
+  - `doc timelines`, parallel Muse Code timelines in Git worktrees, planned and judged by Muse
+    Wonder, starting from the turn bisect found (`--from-bisect`);
   - `doc restore`, rollback without amnesia, with lesson drafts;
   - natural-language restore;
   - the lesson library and `doc start`;
@@ -49,6 +50,7 @@ every commit is dated 2026-10-26 or later.
   - one model client with role routing, logged fallbacks, budgets and secret redaction.
 - **The Muse Glimmer deployment** on Modal ([`deploy/modal/`](deploy/modal/)).
 - **Verified agent-hook research** ([`docs/AGENT-HOOKS.md`](docs/AGENT-HOOKS.md)).
+- **The demo** ([`demo/`](demo/)): a script that builds the demo repository and the video runbook.
 - **The event's changes to dmc**, as 31 patches in [`dmc-patches/`](dmc-patches/), described one
   by one in [PATCHES.md](PATCHES.md):
   - agent-turn checkpoints from Muse Code and Claude Code hooks (`dmc agent-hook`, `dmc hooks`,
@@ -82,7 +84,7 @@ CLAUDE, LICENSE, CHANGELOG, PATCHES, CI and the two tools) were written fresh fo
 | Muse Code | local CLI | The agent in each parallel timeline (`muse exec` headless, one per Git worktree), and a demo agent |
 | Muse Spark 1.3 (`muse-spark-1.3`) | Meta Model API (Baseten Muse Spark Open as the logged fallback) | Natural-language restore: picks a checkpoint and a mode as JSON; Doc validates it, dmc previews and applies |
 | Muse Spark Open (`meta-models/muse-spark-open-1026`) | Baseten, with Fireworks as the logged backup | Lesson drafts, bisect explanations, voice routing; fallback for summaries, briefs and restore |
-| Muse Wonder (`muse-wonder-1.0`) | Meta Model API | Plans the timelines as structured JSON; judging the results is next |
+| Muse Wonder (`muse-wonder-1.0`) | Meta Model API | Plans the timelines and judges their diffs and test results, both as validated JSON; the judgment is advice, the user picks (live since 2026-10-31) |
 | Muse Glimmer 30B (`meta-models/Muse-Glimmer-30B`) | A private deployment on Modal (vLLM 0.28.0, one L40S, FP8) | Per-checkpoint summaries and lesson briefs |
 | Muse Voice Transcribe (`muse-voice-transcribe-1.0`) | Meta Model API, realtime WebSocket | "Hey Doc" push-to-talk |
 

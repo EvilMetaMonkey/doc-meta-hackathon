@@ -33,7 +33,7 @@ dart compile exe bin/doc.dart -o ../build/doc
 | `doc summarize <checkpoint-id>` | Reads `checkpoint show` and `checkpoint diff` JSON from dmc, redacts, and asks the `summary` role for a 2–3 sentence plain-English summary: what changed, which files, anything risky. |
 | `doc usage` | Tokens, audio seconds and estimated cost per provider against the budgets (Modal: calls and tokens; billed by GPU time). |
 | `doc timelines "<task>" --test "<command>" [--from <cp> --state before\|after] [--n 3] [--setup …] [--link <dir>]… [--max-steps <n>] [--timeout <min>] [--yes] [--json]` | Parallel timelines: Muse Wonder plans N approaches, N Muse Code agents try them in separate worktrees, Doc tests and compares them. See "Parallel timelines". |
-| `doc timelines list \| show <run-id> \| pick <run-id> <k> \| clean <run-id>` | Past runs; the picked timeline's diff and the git commands to bring it in (Doc runs none); remove worktree folders (never branches). |
+| `doc timelines list \| show <run-id> \| judge <run-id> \| pick <run-id> <k> \| clean <run-id>` | Past runs; (re)judge a run with Wonder; the picked timeline's diff, its patch and the git commands to bring it in (Doc runs none); remove worktree folders (never branches). |
 | `doc status` | The latest checkpoints (time, agent, status, changed files, undone or not), from `dmc checkpoint list` JSON. |
 | `doc talk [--file <audio>] [--yes]` (alias `doc hey`) | "Hey Doc" push-to-talk: speak a request, Doc says what it heard and which Doc command it would run, and runs it only after a yes. See "Hey Doc". |
 | `doc bisect --test "<command>" [--setup …] [--link <dir>]… [--from <cp>] [--to <cp>] [--all] [--timeout <s>] [--keep] [--no-explain] [--json]` | Time-travel bisect: find the agent turn where the tests started failing, by testing exported checkpoint states. See "Bisect". |
@@ -128,7 +128,7 @@ Defaults, overridable in `config.json` under `roles`:
 | `summary` | modal | `muse-glimmer` (fallback baseten `meta-models/muse-spark-open-1026`) | Per-checkpoint summaries, lesson briefs |
 | `workhorse` | baseten | `meta-models/muse-spark-open-1026` (fallback fireworks) | Bisect explanations, lesson drafts |
 | `restore` | meta | `muse-spark-1.3` (fallback baseten) | Natural-language restore |
-| `planner`, `judge` | meta | `muse-wonder-1.0` | Parallel timelines (`planner` plans the approaches; `judge` is part 2) |
+| `planner`, `judge` | meta | `muse-wonder-1.0` | Parallel timelines (`planner` plans the approaches, `judge` ranks the results) |
 | `voice` | meta | `muse-voice-transcribe-1.0` | "Hey Doc" push-to-talk (`doc talk`), over the realtime WebSocket |
 
 ## Bisect: find the turn that broke the tests
@@ -220,20 +220,22 @@ Restored 1 file(s) through dmc (operation op_mvs8mgpl_2d3cc5d4a20520bbe3763aad).
 Afterwards all 6 tests passed, and the later turns' changes were untouched. Cost: one Baseten
 call, $0.0029.
 
-## Parallel timelines (part 1)
+## Parallel timelines
 
 Spec: on the user's command, Wonder plans three distinct approaches. Three Muse Code agents run
 them in separate worktrees, each with the lesson. Doc runs the tests in each, Wonder judges the
-diffs, and the user picks one. The other two are archived, never deleted. No auto-merge. **Part 1
-is everything except Wonder's judging.**
+diffs, and the user picks one. The other two are archived, never deleted. No auto-merge.
 
 `doc timelines "<task>" --test "<command>"` runs these steps:
 
 1. **Base state, from dmc only.** The latest closed checkpoint's after-state by default, or
    `--from <checkpoint> --state before|after` (default `after`). Doc exports it with `dmc
-   checkpoint export` into its data dir and never reads the working copy. (`--from-bisect` is not
-   offered: `doc bisect --json` results are not stored.) The dmc workspace must be the top of a
-   Git work tree with at least one commit.
+   checkpoint export` into its data dir and never reads the working copy. The dmc workspace must
+   be the top of a Git work tree with at least one commit.
+   - **`--from-bisect`** uses the last `doc bisect` result for this workspace. `doc bisect` saves
+     it in Doc's data dir (`bisect/<workspace fingerprint>.json`). The base is the first bad
+     turn's **after**-state, where the tests fail: its before-state already passes, so there
+     would be nothing to fix there. Doc says so. `--test` defaults to the command bisect used.
 2. **Plan.** The `planner` role (Muse Wonder `muse-wonder-1.0` on Meta) gets the task, the
    matched lesson brief (the existing file-overlap matching; no match means no brief call), the
    base checkpoint's label and changed files, and the base's file names (never contents). The
@@ -246,10 +248,17 @@ is everything except Wonder's judging.**
    `Run N Muse Code agents in separate worktrees (max S steps, T min each, est. cost ≤ $a–$b)? [y/N]`.
    - Muse Code publishes no per-step price, so the estimate is N × `--max-steps` × about 30k
      input + 600 output tokens per step. That is what `muse exec` 1.4.14 used here (27–28k input
-     per step), with no cache discount.
-   - It is priced at Meta's Muse Spark 1.3 rates: $0.10 / $0.20 per million in Contributor mode,
-     which Muse Code used on this Mac (`muse-spark-1.3-contributor`), or $1.25 / $4.25 in
-     Standard mode.
+     per step), with no cache discount. Real runs are far lower, since most input is cached.
+   - It is priced for the model the agents will use. That is `--agent-model <id>` (passed to
+     `muse exec` as `--model`), else Muse Code's configured default: the `model` key of
+     `~/.config/muse/settings.json`, read-only. Meta's prices per million tokens:
+     - `muse-spark-1.3-contributor`: $0.10 / $0.20;
+     - `muse-spark-1.3`: $1.25 / $4.25;
+     - `muse-wonder-1.0`: $4.00 / $20.00.
+
+     With an unknown model it shows both Spark modes.
+   - On 2026-10-31 Mike's Muse Code defaulted to `muse-wonder-1.0` (high reasoning), and three
+     agents cost $0.81; on Contributor-mode Spark (2026-10-28) it was about $0.01.
    - `--yes` answers this question (scripted demos).
 4. **Worktrees, never in the working copy.**
    - Each one is `git worktree add <Doc data dir>/timelines/<run-id>/<k> -b doc/timeline/<run-id>/<k>`,
@@ -280,13 +289,39 @@ is everything except Wonder's judging.**
    and the branch. The run (plans, base, results, branches) is saved as
    `<data dir>/timelines/<run-id>/run.json`, with each agent's `--json` events and stderr next
    to it; `--json` prints the run.
-8. **Pick and archive, no auto-merge.**
+8. **Wonder judges (advice only).** Unless `--no-judge`, the `judge` role (Muse Wonder) gets the
+   task, the base checkpoint's label and, per timeline:
+   - the approach title and plan;
+   - the diff against the base (read-only `git diff`, cut at 6,000 characters);
+   - the test result with the failing tail;
+   - the steps and time.
+
+   The whole prompt is redacted. Wonder answers with `response_format` JSON (verified with the
+   nullable `recommended` on 2026-10-31): `{ranking: [{k, score 0–10, rationale (≤60 words),
+   risks}], recommended: k | null, summary}`. `parseTimelineJudgment` (pure) checks:
+   - every k exists and appears exactly once;
+   - every score is from 0 to 10, and every rationale is at most 60 words;
+   - **a timeline whose tests failed (or did not run) cannot be recommended.** Doc refuses that
+     answer and asks once more. If it happens again, the ranking is shown with no recommendation
+     and a note.
+
+   Timelines with no changes are ranked last unless every timeline is empty. The advice prints
+   under the comparison ("Wonder recommends timeline k: <title> — <summary>", then the ranking
+   with risks) and is saved in the run JSON. **Nothing is applied; the user picks.** `doc
+   timelines judge <run-id>` (re)judges a saved run.
+9. **Pick and archive, no auto-merge.**
    - `doc timelines pick <run-id> <k>` shows that timeline's full diff against the base (a
-     read-only `git diff`) and prints the git commands to bring it in. Two options are given:
-     `git diff <base> <branch>` into a patch plus `git apply --3way`, which moves only the
-     timeline's change, or `git merge --no-ff doc/timeline/<run>/<k>`, which also brings the base
-     commit. It notes that `doc restore <base checkpoint>` may be needed first. **It runs nothing
-     in the repository.** The other timelines show as `archived` and stay as branches.
+     read-only `git diff`). It writes it as `pick-<k>.patch` in the run's folder in Doc's data
+     dir, never the repository, and prints:
+     - `git apply --check` and `git apply` for that file, which move only the timeline's change
+       onto the working copy and keep other changes;
+     - `git merge --no-ff doc/timeline/<run>/<k>` for a clean tree, which also brings the base
+       commit;
+     - a note that `doc restore <base checkpoint>` comes first if the patch does not apply.
+
+     (`git apply --3way` is not offered: it implies `--index` and refuses files with uncommitted
+     changes, the usual state after agent turns.) **It runs nothing in the repository.** The
+     other timelines show as `archived` and stay as branches.
    - `doc timelines list` and `show <run-id>` show past runs.
    - `clean <run-id>` removes the worktree folders after a confirm (`git worktree remove
      --force`, then `prune`) and never deletes a branch.
@@ -441,12 +476,13 @@ confidence}`, parsed strictly with one retry. `planVoiceAction` (pure) validates
 | `lessons` | `doc lessons` | |
 | `bisect` | `doc bisect --test "<command>"` | The test command comes from `{"workspaces": {"<workspace root>": {"bisectTest": "…"}}}` in Doc's config, or Doc asks for one |
 | `status` | `doc status` | |
+| `timelines` | `doc timelines "<text>" --from-bisect` | From the turn the last bisect found, with `--test` from the workspace's `bisectTest` config (else bisect's own test). Always asks "Run it?", even with `--yes` |
 
 Doc prints `I heard: "<transcript>" → I'll run: doc <command> … Run it? [y/N]` and runs the
 command in-process only on yes. An `unknown` command, confidence below 0.6, or an empty
 transcript runs nothing: Doc says what it heard and lists what it can do. **`--yes` answers "Run
-it?" for the read-only commands, never for restore or bisect**, and it is never passed on to the
-command itself.
+it?" for the read-only commands, never for restore, bisect or timelines**, and it is never passed
+on to the command itself.
 
 **Privacy.** Audio goes only to Meta, and only while recording (or while `--file` streams).
 `--local` refuses `doc talk`: there is no local transcription, so it says so and records nothing.

@@ -3,7 +3,7 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-10-31 by Claude (event-only repository session)
+Last updated: 2026-10-31 by Claude (timelines part 2 and demo session)
 
 **Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
 work only. dmc lives in its own repository and is set up in `.deps/dmc` by
@@ -15,6 +15,67 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 ## Done
 
+- **Timelines part 2: Wonder judges** (branch `timelines-2`).
+  - After a run (unless `--no-judge`), and as `doc timelines judge <run-id>`, the `judge` role
+    (Muse Wonder) gets the task, the base label and, per timeline, the approach, the redacted
+    diff, the test result with a failing tail, and the steps and time.
+  - It answers as validated JSON: every k exactly once, scores 0–10, rationales of at most 60
+    words. It cannot recommend a timeline whose tests failed: Doc refuses and retries once, then
+    shows the ranking with no recommendation. Empty timelines are ranked last unless all are
+    empty.
+  - The advice prints under the comparison and is saved in the run JSON; nothing is applied.
+  - Wonder accepted the strict schema with a nullable `recommended` (probe, 2026-10-31).
+- **Demo wiring.**
+  - `doc bisect` saves its last result per workspace in Doc's data dir.
+  - `doc timelines --from-bisect` starts from the first bad turn's after-state with bisect's test
+    command, and says why.
+  - `doc talk` routes "try three different fixes …" to `doc timelines … --from-bisect` (with the
+    workspace's `bisectTest`), and always asks.
+  - `demo/make_demo_repo.dart` and `demo/RUNBOOK.md`.
+- **Fixed from the real run:**
+  - the cost estimate now uses the agents' real model (`--agent-model`, else Muse Code's
+    configured default) — Mike's Muse Code now defaults to `muse-wonder-1.0`, so three agents
+    cost $0.81, not Contributor-mode cents;
+  - `pick` writes the patch to Doc's run folder and prints `git apply` (`git apply --3way` refuses
+    files with uncommitted changes).
+- **Tests:** Doc 176 (was 162):
+  - 6 pure judge tests: valid, invalid k / duplicates / missing / bad fields, failed
+    recommendation, empty last, the prompt, JSON;
+  - 5 CLI judge and `--from-bisect` tests: advice and redaction, an unknown k retried, a failed
+    recommendation twice, `--no-judge` then `judge`, `--from-bisect` with and without a saved
+    bisect;
+  - 1 estimate/`--agent-model` CLI test and 1 pure estimate test;
+  - 2 voice tests: the routing plan, and `--yes` not answering for timelines;
+  - the pick test now checks the printed `git apply` works on a dirty working copy.
+- **Gates:** `tool/setup_dmc.dart` applied 31/31 patches; Doc analyzer clean, 176 tests passed.
+  dmc unchanged.
+- **Real run of demo/RUNBOOK.md** on the Mac, 2026-10-31, in `/tmp/doc-demo` (both hooks):
+  - Setup and warm-up: `make_demo_repo` about 1 s; `doc models --check` 121 s (cold Glimmer
+    113 s).
+  - Four real turns: Claude Code 19 s, Muse Code 36 s (the bug: `apply_discount` takes a
+    fraction), Claude Code 15 s, Muse Code 17 s.
+  - `doc bisect` found the Muse turn in 4 probes, 2 s.
+  - `doc timelines --from-bisect --max-steps 10`: 3 agents on `muse-wonder-1.0` (7, 7 and 10
+    steps), all passing; 66 s.
+    - Wonder recommended timeline 1 (restore the percent contract, +4 −4).
+    - It ranked the 61-line compatibility layer last, with real risks.
+  - `pick` under 1 s, working copy unchanged; `git apply --check` / `git apply`; all 6 tests
+    passed, with turns 1, 3 and 4 kept.
+  - Lesson draft 2 s (title "Undid: …", reason from the note), approved; the brief from Glimmer
+    13–15 s; `doc start` checked with `DOC_MUSE_BIN=/bin/echo` (the TUI needs a terminal).
+  - Voice: "try three different fixes for the failing tests" → `doc timelines … --from-bisect`
+    (answered n); "take me back to before the discount change" → NL restore picked the Muse
+    turn at 0.95, and dmc refused because `money.py` had changed since (the applied fix). In the
+    runbook that variant now comes before applying.
+  - Cost:
+    - Meta about $0.066 (Wonder plan $0.026, judge $0.026, NL restore $0.0037, the check, 4 s of
+      voice, one probe);
+    - Baseten about $0.010; Fireworks $0.0006;
+    - Muse Code agents $0.81 (Wonder);
+    - Modal metered $1.44 for the month (+$0.51 since 2026-10-28);
+    - Claude Code turns on the subscription.
+  - Hooks uninstalled (Muse `settings.json` back to its pre-session SHA-256 `88778f4f…`), and the
+    worktrees, run, bisect record, lesson and `/tmp` repo removed.
 - **Event-only repository** (2026-10-31). The organizers require a fresh repository with only
   event work, so the entry moved from `EvilMetaMonkey/dmc-meta-hackathon` (which held dmc's
   pre-event code and history up to `pre-hackathon`, `d177c4b`) to
@@ -552,10 +613,12 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 - Lesson drafts can only explain *why* a change failed if someone says so (the "What went
   wrong?" answer or `--note`); dmc records what changed, not why. Without it the draft now says
   "Not stated" and cannot be approved until edited.
-- Timelines: the planner is told the task, but "fix the bug" from the *before*-state of the first
-  bad turn has nothing to fix, since that state passes by definition (seen in the real run).
-  From the before-state, ask for the bad turn's goal done in a way the tests accept; from the
-  after-state, ask for the fix. A timed-out agent is killed with SIGTERM/SIGKILL on its own
+- Timelines: `--from-bisect` always uses the after-state (where the fix is needed). With `--from
+  … --state before`, the task must be the bad turn's goal done in a way the tests accept. Muse
+  Code's model decides the cost: on Mike's current default (`muse-wonder-1.0`, high reasoning)
+  three agents cost about $0.80 per run (`--agent-model muse-spark-1.3-contributor` for cents).
+  Wonder's judgment is advice from diffs and test results only; it does not run code. A timed-out
+  agent is killed with SIGTERM/SIGKILL on its own
   process; shell children it started may outlive it. The cost estimate is based on two probes
   (about 28k input tokens per step) and Muse Code bills its own account, so Doc only reports
   costs, it does not budget them. `pick`'s `git merge` option also brings the "timeline base"
@@ -590,11 +653,13 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
-1. Timelines part 2: Muse Wonder judges the diffs and test results (the `judge` role), and demo
-   integration (bisect → timelines → pick in one flow, with the lesson).
-2. A live `doc talk` with Mike at the microphone (first-run permission prompt, Space/Enter,
-   Esc), ideally with SoX installed (`brew install sox`).
-3. Then, per the spec's schedule: demo and README (Nov 3), submit (Nov 4).
+1. Demo polish: record the video from demo/RUNBOOK.md (Mike), with a live `doc talk` at the
+   microphone (first-run permission prompt, Space/Enter, Esc; ideally `brew install sox`).
+2. Parity items in dmc (through `.deps/dmc` and `tool/export_patches.dart`):
+   - a clean `dmc disable`;
+   - `dmc doctor` detecting broken or stale agent hooks (a hook pointing at a dmc that no longer
+     exists, or at an old build).
+3. Submit (Nov 4).
 
 - Mike: once happy with this repository, make `EvilMetaMonkey/dmc-meta-hackathon` private (or
   archive it with a README pointing here). Name dmc and its setup (`tool/setup_dmc.dart`) in the
@@ -609,6 +674,13 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 ## Session log
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
+
+- 2026-10-31 · Claude · Timelines part 2 and demo (branch `timelines-2`): Wonder judging with
+  validated JSON, `--from-bisect`, the voice timelines route, the model-aware estimate and
+  `--agent-model`, `pick` writing a patch for plain `git apply`, `demo/make_demo_repo.dart` and
+  `demo/RUNBOOK.md`. Verified with 176 Doc tests and a real end-to-end runbook run (Muse Code
+  $0.81 on Wonder, the rest under $0.10 plus Modal). Left open: recording the video, and the
+  parity items.
 
 - 2026-10-31 · Claude · Event-only repository: classified every changed path, filtered the event
   history into `EvilMetaMonkey/doc-meta-hackathon`, turned dmc's changes into 31 `git am` patches

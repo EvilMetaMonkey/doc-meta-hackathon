@@ -3,6 +3,26 @@
 Event work only (Meta AI Developer Hackathon 2026, from 2026-10-26). Changes to dmc are listed
 by patch in [PATCHES.md](PATCHES.md).
 
+## 2026-10-31: Wonder judges the timelines; demo wiring
+
+- Muse Wonder (`judge` role) ranks the finished timelines as validated JSON:
+  - it gets each timeline's approach, redacted diff, test result and steps;
+  - it cannot recommend a timeline whose tests failed (Doc refuses and retries, then shows the
+    ranking with no recommendation);
+  - empty timelines are ranked last;
+  - the advice shows under the comparison and is saved in the run.
+
+  `doc timelines judge <run-id>`; `--no-judge`.
+- `doc bisect` saves its last result per workspace. `doc timelines --from-bisect` starts from the
+  first bad turn's after-state, with bisect's test command.
+- `doc talk` routes "try three different fixes for the failing test" to `doc timelines …
+  --from-bisect`, and always asks before running it.
+- `doc timelines` estimates with the agents' real model (`--agent-model`, else Muse Code's
+  configured default) instead of assuming Contributor-mode Spark.
+- `doc timelines pick` writes the patch to Doc's run folder and prints `git apply`, which applies
+  onto a working copy with uncommitted changes (`git apply --3way` refused those).
+- `demo/make_demo_repo.dart` and `demo/RUNBOOK.md`, run end to end with real agents and models.
+
 ## 2026-10-31: event-only repository
 
 - The entry moved to this repository. Its history is the event's history, filtered to Doc,
