@@ -15,7 +15,7 @@ baseline), pinned by SHA.
 **Verified on 2026-10-31:**
 
 - The series applies cleanly with `git am` to a fresh clone of EvilMetaMonkey/dmc at that commit
-  (re-checked on 2026-10-31 with 34 patches: a clean `tool/setup_dmc.dart` applied 34 of 34).
+  (re-checked on 2026-10-31 with 35 patches: a clean `tool/setup_dmc.dart` applied 35 of 35).
 - The resulting dmc tree is identical, blob for blob, to the dmc files of the event repository
   it came from (`EvilMetaMonkey/dmc-meta-hackathon` `main` at `0f58a36`).
 - `tool/export_patches.dart` reproduces the series byte for byte.
@@ -66,6 +66,7 @@ repository with their real history.
 | 0032 | Add dmc disable and JSON hooks status | `lib/dmc.dart`, `lib/src/cli.dart`, `lib/src/disable.dart`, `lib/src/hook_installer.dart`, `lib/src/hook_report.dart`, `test/disable_test.dart` | Parity: `dmc disable [--apply]` removes only dmc's own hooks (every supported config file, this build's and other dmc builds', exact-match uninstall, byte-exact restore) and stops the watcher, keeping `.dmc/` and every checkpoint; `hooks status --json` (for `doc doctor`); `capabilities` lists both |
 | 0033 | dmc doctor checks agent hooks | `lib/dmc.dart`, `lib/src/cli.dart`, `lib/src/doctor.dart`, `lib/src/hook_doctor.dart`, `test/hook_doctor_test.dart` | Parity: doctor reports a missing or non-executable dmc in a hook, a hook pointing at a different dmc build, a non-async Muse Interrupt hook, and an agent checkpoint left open past `--stale-hours` (default 2) by an ended session, each with its fix; it changes nothing |
 | 0034 | Document dmc disable, the doctor hook checks and hooks status --json | `AGENTS.md`, `CHANGELOG.md` | Docs for 0032–0033 |
+| 0035 | doctor: skip the execute-bit check on Windows by default | `lib/src/hook_doctor.dart` | Fix for 0033 on Windows (no execute bit), found by CI |
 
 ## Step 1: every path changed since the `pre-hackathon` tag
 

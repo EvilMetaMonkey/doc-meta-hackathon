@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Sat, 31 Oct 2026 16:10:41 -0500
+Subject: [PATCH] doctor: skip the execute-bit check on Windows by default
+
+checkDmcHooks took isWindows = false unless told, so on windows-latest
+every hook executable looked not executable (Windows has no execute bit).
+It now defaults to Platform.isWindows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/src/hook_doctor.dart | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/lib/src/hook_doctor.dart b/lib/src/hook_doctor.dart
+index e94b8689a3eb5490c7451fdb462fd84d0391a8e2..fbd1a2281cdcd01ad0cbb6d4ad66010dee9fe56c 100644
+--- a/lib/src/hook_doctor.dart
++++ b/lib/src/hook_doctor.dart
+@@ -30,8 +30,10 @@ String _scopeArgs(HookLocation location) =>
+ List<HookFinding> checkDmcHooks(
+   List<HookConfigFile> files, {
+   required String? currentCommand,
+-  bool isWindows = false,
++  bool? isWindows,
+ }) {
++  // Windows has no execute bit to check.
++  final windows = isWindows ?? Platform.isWindows;
+   final findings = <HookFinding>[];
+   for (final file in files) {
+     if (!file.exists) continue;
+@@ -59,7 +61,7 @@ List<HookFinding> checkDmcHooks(
+               'dmc disable --apply, then dmc hooks install ${_scopeArgs(location)} --apply',
+             ),
+           );
+-        } else if (!isWindows &&
++        } else if (!windows &&
+             type == FileSystemEntityType.file &&
+             (File(executable).statSync().mode & 0x49) == 0) {
+           findings.add(

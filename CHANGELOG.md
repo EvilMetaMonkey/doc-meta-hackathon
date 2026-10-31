@@ -15,7 +15,7 @@ by patch in [PATCHES.md](PATCHES.md).
   microphone tool, and Muse Code with the agents' model and the estimated cost of a timelines
   run. Each line is ok / warn / FAIL with its fix. No model calls unless `--check`, which also
   warms Muse Glimmer.
-- **dmc (patches 0032–0034):**
+- **dmc (patches 0032–0035):**
   - `dmc disable [--apply]` removes only dmc's own hooks (every supported config file, any dmc
     build, byte-exact) and stops the watcher, keeping all history;
   - `dmc doctor` reports a missing or non-executable dmc in a hook, a hook pointing at another dmc

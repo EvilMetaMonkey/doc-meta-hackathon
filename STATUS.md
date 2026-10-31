@@ -24,7 +24,7 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
       `actual_change` (≤25 words) per timeline, validated strictly. The ranking shows
       "Planned: … / Did: …" and flags "DIDN'T FOLLOW ITS PLAN". The comparison (printed after
       judging) shows "did (per Wonder)". Scores are never changed by Doc.
-  - **dmc parity** (patches 0032–0034, made in `.deps/dmc` and exported):
+  - **dmc parity** (patches 0032–0035, made in `.deps/dmc` and exported):
     - `dmc disable [--apply] [--json]` removes only dmc's own hooks from every supported config
       file (any dmc build), through the exact-match uninstall with byte-exact restore, and
       stops the watcher; `.dmc/` and every checkpoint stay;
@@ -34,7 +34,7 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
     - `dmc hooks status --json`;
     - 11 new dmc tests (234 in all).
     - `tool/export_patches.dart` now writes unnumbered subjects (0001–0031 changed only in that
-      line), and a clean `tool/setup_dmc.dart` applies 34 of 34.
+      line), and a clean `tool/setup_dmc.dart` applies 35 of 35 (0035 fixes 0033 on Windows, found by CI).
   - **`doc doctor [--check]`:** dmc, workspace, hooks (via dmc JSON), keys (never values) and
     roles, Modal, microphone, Muse Code's agent model with the estimate, and Claude Code; each
     line ok/warn/FAIL with its fix. `--check` sends one tiny prompt per provider and warms
@@ -58,7 +58,7 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
         as "DIDN'T FOLLOW ITS PLAN".
     - Cost: Muse Code $0.012, Wonder $0.046 (planner and judge), plus the two Muse demo turns on
       Wonder (not metered), the `--check` calls (about $0.003) and Modal GPU time.
-  - **Gates:** a clean `setup_dmc` (34/34); dmc analyzer clean, 234 tests, 3 contract tests;
+  - **Gates:** a clean `setup_dmc` (35/35); dmc analyzer clean, 234 tests, 3 contract tests;
     Doc analyzer clean, 187 tests.
 - **Timelines part 2: Wonder judges** (branch `timelines-2`).
   - After a run (unless `--no-judge`), and as `doc timelines judge <run-id>`, the `judge` role
