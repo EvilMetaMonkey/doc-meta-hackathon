@@ -749,11 +749,13 @@ first summary does not wait about 90 seconds for a cold start.
 ## Tests
 
 ```sh
+dart run tool/setup_dmc.dart          # once, from the repository root: dmc in .deps/dmc
 cd doc
 dart pub get --enforce-lockfile
 dart analyze --fatal-infos
-DMC_TEST_BIN=../build/dmc/bundle/bin/dmc dart test --concurrency=1
+DMC_TEST_BIN=../.deps/dmc/build/dmc/bundle/bin/dmc dart test --concurrency=1
 ```
 
-Without `DMC_TEST_BIN`, the CLI tests build dmc with `dart build cli` first. Fake HTTP servers
+Without `DMC_TEST_BIN`, the CLI tests build `.deps/dmc` with `dart build cli` first (and say to
+run `tool/setup_dmc.dart` if it is missing). Fake HTTP servers
 stand in for every provider; no test makes a real model call.

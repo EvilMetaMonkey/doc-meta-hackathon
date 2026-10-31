@@ -1,5 +1,10 @@
 # Agent hooks: verified integration facts
 
+> In this repository, dmc lives in `.deps/dmc` (set up by `dart run tool/setup_dmc.dart` from
+> [EvilMetaMonkey/dmc](https://github.com/EvilMetaMonkey/dmc) plus `dmc-patches/`). Paths such as
+> `lib/src/agent_hooks.dart` and `test/fixtures/agent_hooks/` below are inside that checkout, and
+> the code that implements them is in the patches (see [PATCHES.md](../PATCHES.md)).
+
 This page records what is known about the hook surfaces of the coding agents that dmc integrates
 with, how each fact was established, and where the research disagrees with what was observed. dmc
 builds on these facts in `dmc agent-hook` and `dmc hooks` (see "Using it" at the end).
