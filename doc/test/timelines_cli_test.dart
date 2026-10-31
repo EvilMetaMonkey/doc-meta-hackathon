@@ -35,6 +35,7 @@ String plan(List<(String, String)> items) => jsonEncode({
               'FAKE-FIX' => 'FAKE-FIX: put the good value back in the state file.',
               'FAKE-WRONG' => 'FAKE-WRONG: add a notes file explaining the state instead.',
               'FAKE-FAIL' => 'FAKE-FAIL: rewrite the whole module from scratch carefully.',
+              'FAKE-NOOP' => 'FAKE-NOOP: only read the files and report what you see.',
               _ => 'FAKE-HANG: think about it for a very long time first.',
             }}',
         'files_likely': ['state.txt'],
@@ -184,9 +185,16 @@ void main() {
 
   tearDown(() => home.deleteSync(recursive: true));
 
-  Future<FakeProvider> planner(String reply) async {
+  /// Muse Wonder on a fake meta: the plan, then each judge reply in turn
+  /// (the last reply repeats).
+  Future<FakeProvider> planner(
+    String reply, {
+    List<String> judge = const [],
+  }) async {
     final meta = await FakeProvider.start([
       FakeReply.chat(reply, model: 'muse-wonder-1.0'),
+      for (final answer in judge)
+        FakeReply.chat(answer, model: 'muse-wonder-1.0'),
     ]);
     addTearDown(meta.close);
     File(p.join(home.path, 'config', 'config.json'))
@@ -271,7 +279,7 @@ void main() {
     final text = '$out';
 
     // The planner got the task, the base facts and file names, as JSON.
-    final request = meta.requests.single.body!;
+    final request = meta.requests.first.body!;
     expect(request['model'], 'muse-wonder-1.0');
     expect(request['response_format'], isNotNull);
     final sent = ((request['messages'] as List)[1] as Map)['content'] as String;
@@ -572,5 +580,238 @@ void main() {
     expect('$err', contains('--local refuses doc timelines'));
     expect(meta.requests, isEmpty);
     expect(await branches(), isEmpty);
+  });
+
+  String judged(List<(int, num, String)> ranking, Object? recommended) =>
+      jsonEncode({
+        'ranking': [
+          for (final (k, score, why) in ranking)
+            {
+              'k': k,
+              'score': score,
+              'rationale': why,
+              'risks': ['none seen'],
+            },
+        ],
+        'recommended': recommended,
+        'summary': 'It puts the good value back with the smallest change.',
+      });
+
+  String judgePrompt(FakeProvider meta, int index) =>
+      ((meta.requests[index].body!['messages'] as List)[1] as Map)['content']
+          as String;
+
+  test('Wonder judges after the run: advice under the table, empty '
+      'timelines last, saved, redacted', () async {
+    const secret = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123';
+    final meta = await planner(
+      plan([
+        ('Put the value back', 'FAKE-FIX'),
+        ('Write notes', 'FAKE-WRONG'),
+        ('Just look', 'FAKE-NOOP'),
+      ]),
+      judge: [
+        judged([
+          (3, 9, 'Changed nothing.'),
+          (1, 8, 'Fixes it.'),
+          (2, 2, 'Leaves the bug.'),
+        ], 1),
+      ],
+    );
+    expect(
+      await doc([
+        'timelines',
+        'fix it, token $secret',
+        '--test',
+        goodTest,
+        '--max-steps',
+        '5',
+        '--yes',
+      ]),
+      0,
+      reason: '$out\n$err',
+    );
+    final text = '$out';
+    expect(
+      text,
+      contains(
+        'Wonder recommends timeline 1: Put the value back — It puts the good value back with the smallest change.',
+      ),
+    );
+    expect(
+      text,
+      contains(
+        'Ranking (advice only; you pick):\n  1. [1] Put the value back  8/10',
+      ),
+    );
+    expect(text, contains('  2. [2] Write notes  2/10'));
+    expect(text, contains('  3. [3] Just look (no changes)  9/10'));
+    expect(text, contains('Advice only: nothing was applied.'));
+    expect(meta.requests, hasLength(2));
+    final request = meta.requests[1].body!;
+    expect(request['model'], 'muse-wonder-1.0');
+    expect((request['response_format'] as Map)['type'], 'json_schema');
+    final prompt = judgePrompt(meta, 1);
+    expect(prompt, contains('=== Timeline 1: Put the value back'));
+    expect(prompt, contains('-bad\n+good'));
+    expect(prompt, contains('Tests: FAILED'));
+    expect(prompt, contains('=== Timeline 3: Just look'));
+    expect(prompt, contains('Diff: (no changes)'));
+    expect(prompt, isNot(contains(secret)));
+    final judgment = runJson()['judgment'] as Map;
+    expect(judgment['recommended'], 1);
+    expect(judgment['provider'], 'meta');
+    expect((judgment['ranking'] as List).map((e) => (e as Map)['k']), [
+      1,
+      2,
+      3,
+    ]);
+  });
+
+  test('an unknown timeline is refused and asked once more', () async {
+    final meta = await planner(
+      plan([('Put the value back', 'FAKE-FIX'), ('Write notes', 'FAKE-WRONG')]),
+      judge: [
+        judged([(1, 8, 'a'), (9, 2, 'b')], 1),
+        judged([(1, 8, 'a'), (2, 2, 'b')], 1),
+      ],
+    );
+    expect(
+      await doc([
+        'timelines',
+        'fix it',
+        '--test',
+        goodTest,
+        '--n',
+        '2',
+        '--yes',
+      ]),
+      0,
+      reason: '$err',
+    );
+    expect(meta.requests, hasLength(3));
+    expect('$err', contains('Timeline 9 does not exist'));
+    expect(judgePrompt(meta, 2), contains('=== Timeline 1'));
+    expect('$out', contains('Wonder recommends timeline 1'));
+  });
+
+  test('recommending a failed timeline twice shows the ranking with no '
+      'recommendation', () async {
+    await planner(
+      plan([('Put the value back', 'FAKE-FIX'), ('Write notes', 'FAKE-WRONG')]),
+      judge: [
+        judged([(2, 9, 'a'), (1, 3, 'b')], 2),
+      ],
+    );
+    expect(
+      await doc([
+        'timelines',
+        'fix it',
+        '--test',
+        goodTest,
+        '--n',
+        '2',
+        '--yes',
+      ]),
+      0,
+      reason: '$err',
+    );
+    expect('$err', contains('tests did not pass'));
+    expect('$out', contains('Wonder recommends none of the timelines'));
+    expect('$out', contains('Doc dropped Wonder\'s recommendation'));
+    expect((runJson()['judgment'] as Map)['recommended'], isNull);
+  });
+
+  test(
+    '--no-judge skips judging; doc timelines judge judges a saved run',
+    () async {
+      final meta = await planner(
+        plan([
+          ('Put the value back', 'FAKE-FIX'),
+          ('Write notes', 'FAKE-WRONG'),
+        ]),
+        judge: [
+          judged([(1, 8, 'a'), (2, 2, 'b')], 1),
+        ],
+      );
+      expect(
+        await doc([
+          'timelines',
+          'fix it',
+          '--test',
+          goodTest,
+          '--n',
+          '2',
+          '--yes',
+          '--no-judge',
+        ]),
+        0,
+        reason: '$err',
+      );
+      expect(meta.requests, hasLength(1));
+      expect('$out', isNot(contains('Wonder recommends')));
+      final id = runJson()['id'] as String;
+      expect(runJson()['judgment'], isNull);
+      out.clear();
+      expect(await doc(['timelines', 'judge', id]), 0, reason: '$err');
+      expect(meta.requests, hasLength(2));
+      expect(
+        '$out',
+        contains('Wonder recommends timeline 1: Put the value back'),
+      );
+      expect((runJson()['judgment'] as Map)['recommended'], 1);
+      out.clear();
+      expect(await doc(['timelines', 'show', id]), 0);
+      expect('$out', contains('Wonder recommends timeline 1'));
+    },
+  );
+
+  test('--from-bisect starts from the first bad turn\'s after-state with '
+      'bisect\'s test', () async {
+    await planner(
+      plan([('Put the value back', 'FAKE-FIX'), ('Write notes', 'FAKE-WRONG')]),
+    );
+    expect(
+      await doc([
+        'timelines',
+        'fix it',
+        '--from-bisect',
+        '--n',
+        '2',
+        '--yes',
+        '--no-judge',
+      ]),
+      1,
+    );
+    expect('$err', contains('No saved doc bisect result'));
+    expect(
+      await doc(['bisect', '--test', goodTest, '--no-explain']),
+      0,
+      reason: '$out\n$err',
+    );
+    expect('$out', contains('First bad turn: ${ids[1]}'));
+    out.clear();
+    expect(
+      await doc([
+        'timelines',
+        'fix it',
+        '--from-bisect',
+        '--n',
+        '2',
+        '--yes',
+        '--no-judge',
+      ]),
+      0,
+      reason: '$out\n$err',
+    );
+    expect('$out', contains('Base from the last doc bisect'));
+    expect('$out', contains('first bad turn ${ids[1]}. Using its after-state'));
+    final run = runJson();
+    expect(run['test'], goodTest);
+    expect(run['base'], containsPair('checkpointId', ids[1]));
+    expect(run['base'], containsPair('state', 'after'));
+    final timelines = (run['timelines'] as List).cast<Map>();
+    expect((timelines[0]['test'] as Map)['passed'], isTrue);
+    expect((timelines[1]['test'] as Map)['passed'], isFalse);
   });
 }

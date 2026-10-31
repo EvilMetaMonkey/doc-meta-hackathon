@@ -312,4 +312,175 @@ void main() {
       '    branch: doc/timeline/tl-1/3  (not picked yet)',
     ]);
   });
+
+  group('judging', () {
+    String judged(List<(int, num, String)> ranking, Object? recommended) =>
+        jsonEncode({
+          'ranking': [
+            for (final (k, score, why) in ranking)
+              {
+                'k': k,
+                'score': score,
+                'rationale': why,
+                'risks': ['a risk'],
+              },
+          ],
+          'recommended': recommended,
+          'summary': 'Timeline one is the smallest correct fix.',
+        });
+
+    test('a valid judgment is parsed and shown as advice', () {
+      final run = sampleRun();
+      final judgment = parseTimelineJudgment(
+        judged([
+          (1, 9, 'Minimal and correct.'),
+          (2, 4, 'Bigger.'),
+          (3, 1, 'Nothing.'),
+        ], 1),
+        run,
+      );
+      expect(judgment.recommended, 1);
+      expect(judgment.ranking.map((e) => e.k), [1, 2, 3]);
+      expect(timelineJudgmentLines(run, judgment), [
+        'Wonder recommends timeline 1: Fix helper — Timeline one is the smallest correct fix.',
+        'Ranking (advice only; you pick):',
+        '  1. [1] Fix helper  9/10',
+        '     Minimal and correct.',
+        '     Risks: a risk',
+        '  2. [2] Round callers  4/10',
+        '     Bigger.',
+        '     Risks: a risk',
+        '  3. [3] Decimal (no changes)  1/10',
+        '     Nothing.',
+        '     Risks: a risk',
+      ]);
+    });
+
+    test(
+      'unknown, duplicate or missing timelines and bad fields are refused',
+      () {
+        final run = sampleRun();
+        void refused(String content, String why) => expect(
+          () => parseTimelineJudgment(content, run),
+          throwsA(
+            isA<TimelineJudgeRefused>().having(
+              (e) => e.message,
+              'message',
+              contains(why),
+            ),
+          ),
+        );
+        refused(
+          judged([(1, 9, 'a'), (2, 4, 'b'), (9, 1, 'c')], 1),
+          'Timeline 9 does not exist',
+        );
+        refused(
+          judged([(1, 9, 'a'), (1, 4, 'b'), (3, 1, 'c')], 1),
+          'ranked twice',
+        );
+        refused(
+          judged([(1, 9, 'a'), (2, 4, 'b')], 1),
+          'leaves out timeline(s) 3',
+        );
+        refused(
+          judged([(1, 11, 'a'), (2, 4, 'b'), (3, 1, 'c')], 1),
+          'from 0 to 10',
+        );
+        refused(
+          judged([
+            (1, 9, List.filled(61, 'w').join(' ')),
+            (2, 4, 'b'),
+            (3, 1, 'c'),
+          ], 1),
+          'at most 60',
+        );
+        refused(
+          judged([(1, 9, 'a'), (2, 4, 'b'), (3, 1, 'c')], 7),
+          'does not exist',
+        );
+        refused('nope', 'not a JSON object');
+      },
+    );
+
+    test('recommending a timeline whose tests failed is refused, with the '
+        'ranking kept for a fallback', () {
+      final run = sampleRun();
+      try {
+        parseTimelineJudgment(
+          judged([(2, 8, 'a'), (1, 7, 'b'), (3, 1, 'c')], 2),
+          run,
+        );
+        fail('accepted a failed recommendation');
+      } on TimelineJudgeRefused catch (error) {
+        expect(error.failedRecommendation, isTrue);
+        expect(error.message, contains('tests did not pass'));
+        expect(error.ranking!.recommended, isNull);
+        expect(error.ranking!.ranking.map((e) => e.k), [2, 1, 3]);
+      }
+      // Timeline 3 never ran its tests: also not recommendable.
+      expect(
+        () => parseTimelineJudgment(
+          judged([(3, 8, 'a'), (1, 7, 'b'), (2, 1, 'c')], 3),
+          run,
+        ),
+        throwsA(isA<TimelineJudgeRefused>()),
+      );
+      // No recommendation is fine.
+      expect(
+        parseTimelineJudgment(
+          judged([(1, 3, 'a'), (2, 2, 'b'), (3, 1, 'c')], null),
+          run,
+        ).recommended,
+        isNull,
+      );
+    });
+
+    test('timelines with no changes are ranked last unless all are empty', () {
+      final run = sampleRun();
+      final judgment = parseTimelineJudgment(
+        judged([(3, 9, 'empty'), (1, 8, 'fix'), (2, 2, 'big')], 1),
+        run,
+      );
+      expect(judgment.ranking.map((e) => e.k), [1, 2, 3]);
+      for (final t in run.timelines) {
+        t.files = const [];
+      }
+      expect(
+        parseTimelineJudgment(
+          judged([(3, 9, 'a'), (1, 8, 'b'), (2, 2, 'c')], 1),
+          run,
+        ).ranking.map((e) => e.k),
+        [3, 1, 2],
+      );
+    });
+
+    test('the judge prompt carries plans, diffs and failing tails', () {
+      final run = sampleRun();
+      final message = timelineJudgeMessage(run, {
+        1: '-    return round(amount, 1)\n+    return round(amount, 2)',
+        2: 'x' * (judgeDiffLimitChars + 10),
+      });
+      expect(message, contains('Task: fix it'));
+      expect(message, contains('=== Timeline 1: Fix helper\nPlan: plan one'));
+      expect(message, contains('+    return round(amount, 2)'));
+      expect(message, contains('Tests: FAILED\nFailing output (tail):'));
+      expect(message, contains('AssertionError: 20.0 != 19.99'));
+      expect(message, contains('diff cut at $judgeDiffLimitChars characters'));
+      expect(message, contains('=== Timeline 3: Decimal'));
+      expect(message, contains('Diff: (no changes)'));
+      final schema =
+          (timelineJudgeFormat([1, 2, 3])['json_schema'] as Map)['schema']
+              as Map;
+      expect(((schema['properties'] as Map)['ranking'] as Map)['minItems'], 3);
+    });
+
+    test('the judgment is saved in the run JSON', () {
+      final run = sampleRun()
+        ..judgment = {'recommended': 1, 'summary': 's', 'ranking': []};
+      final back = TimelineRun.fromJson(
+        jsonDecode(jsonEncode(run.toJson())) as Map,
+      );
+      expect(back.judgment, {'recommended': 1, 'summary': 's', 'ranking': []});
+    });
+  });
 }

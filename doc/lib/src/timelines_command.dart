@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:path/path.dart' as p;
 
 import 'cli.dart';
+import 'bisect_store.dart';
 import 'dmc_client.dart';
 import 'lesson_commands.dart';
 import 'lessons.dart';
@@ -122,6 +123,8 @@ Future<int> runTimelinesCommand(DocContext context, TimelineDeps deps) async {
           return _list(context);
         case 'show':
           return _show(context);
+        case 'judge':
+          return await _judgeCommand(context);
         case 'pick':
           return await _pick(context);
         case 'clean':
@@ -139,8 +142,8 @@ Future<int> runTimelinesCommand(DocContext context, TimelineDeps deps) async {
 }
 
 const String _usage =
-    'Usage: doc timelines "<task>" --test "<command>" [--from <checkpoint> --state before|after] [--n 3] [--setup "<command>"] [--link <dir>]... [--max-steps <n>] [--timeout <minutes>] [--yes] [--json]\n'
-    '       doc timelines list | show <run-id> | pick <run-id> <k> | clean <run-id>';
+    'Usage: doc timelines "<task>" --test "<command>" [--from <checkpoint> --state before|after | --from-bisect] [--n 3] [--setup "<command>"] [--link <dir>]... [--max-steps <n>] [--timeout <minutes>] [--no-judge] [--yes] [--json]\n'
+    '       doc timelines list | show <run-id> | judge <run-id> | pick <run-id> <k> | clean <run-id>';
 
 Future<int> _run(DocContext context, TimelineDeps deps) async {
   final args = context.args;
@@ -148,10 +151,14 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   final yes = args['yes'] as bool;
   void say(String line) => json ? context.log(line) : context.out.writeln(line);
   final task = context.args.rest.skip(1).join(' ').trim();
-  final test = (args['test'] as String?)?.trim();
-  if (task.isEmpty || test == null || test.isEmpty) {
+  var test = (args['test'] as String?)?.trim();
+  final fromBisect = args['from-bisect'] as bool;
+  if (task.isEmpty || ((test == null || test.isEmpty) && !fromBisect)) {
     context.log(_usage);
     return 2;
+  }
+  if (fromBisect && args['from'] != null) {
+    throw const _Abort('Use --from or --from-bisect, not both.', 2);
   }
   int option(String name, int fallback, int low, int high) {
     final text = args[name] as String?;
@@ -165,8 +172,9 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   final n = option('n', 3, 2, 5);
   final maxSteps = option('max-steps', 20, 1, 200);
   final timeoutMinutes = option('timeout', 10, 1, 120);
-  final state = (args['state'] as String?) ?? 'after';
-  if (state != 'before' && state != 'after') {
+  if (args['state'] != null &&
+      args['state'] != 'before' &&
+      args['state'] != 'after') {
     throw const _Abort('--state takes before or after.', 2);
   }
   if (context.router.localOnly) {
@@ -194,7 +202,30 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   final items = ((listed['data'] as Map)['checkpoints'] as List)
       .whereType<Map>()
       .toList();
-  final from = args['from'] as String?;
+  var from = args['from'] as String?;
+  var state = (args['state'] as String?) ?? 'after';
+  if (fromBisect) {
+    final last = loadLastBisect(context.env, fingerprint);
+    final firstBad = last?['firstBad'];
+    if (last == null || firstBad is! Map) {
+      throw _Abort(
+        'No saved doc bisect result for $root. Run doc bisect --test "<command>" first, or pass --from <checkpoint>.',
+      );
+    }
+    from = firstBad['id'] as String;
+    if (args['state'] != null && state != 'after') {
+      say(
+        'Note: --from-bisect starts from the first bad turn\'s after-state; --state $state is ignored.',
+      );
+    }
+    state = 'after';
+    test = (test == null || test.isEmpty) ? last['test'] as String : test;
+    say(
+      'Base from the last doc bisect (${last['savedAt']}): first bad turn $from. Using its after-state, where the tests fail; its before-state already passes, so there would be nothing to fix.',
+    );
+  }
+  final String testCommand = test ?? '';
+  if (testCommand.isEmpty) throw const _Abort(_usage, 2);
   final Map baseItem;
   if (from == null) {
     final closed = items.where((c) => c['status'] == 'closed').toList()
@@ -310,7 +341,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
         baseLabel: baseLabel,
         baseChanged: baseChanged,
         files: exportFiles.toList()..sort(),
-        test: test,
+        test: testCommand,
       ),
     ),
   ];
@@ -406,7 +437,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     id: runId,
     createdAt: now.toUtc().toIso8601String(),
     task: task,
-    test: test,
+    test: testCommand,
     setup: setup,
     links: links,
     maxSteps: maxSteps,
@@ -599,7 +630,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       ?lesson,
       'Approach ${t.k} of $n: ${t.approach.title}\n${t.approach.plan}',
       'Task: $task',
-      'Work only in this folder. When you are done, Doc runs the tests here with: $test',
+      'Work only in this folder. When you are done, Doc runs the tests here with: $testCommand',
     ].join('\n\n');
     final watch = Stopwatch()..start();
     t.status = TimelineStatus.running;
@@ -750,7 +781,12 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
         setupFailed = !ran.passed;
       }
       if (!setupFailed) {
-        final ran = await runShell(test, t.worktree, probeTimeout, context.env);
+        final ran = await runShell(
+          testCommand,
+          t.worktree,
+          probeTimeout,
+          context.env,
+        );
         output.write(ran.output);
         testTimedOut = ran.timedOut;
         passed = ran.passed;
@@ -819,6 +855,12 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   say(
     'Muse Code: \$${spent.toStringAsFixed(4)} (from each run\'s reported tokens); planner: \$${plannerCost.toStringAsFixed(4)}.',
   );
+  // 8. Wonder's judgment: advice only.
+  if (!interrupted && !(args['no-judge'] as bool)) {
+    say('');
+    await _judge(context, active, say);
+    _save(context, active);
+  }
   say(
     interrupted
         ? 'Stopped. Worktrees and branches are kept: doc timelines show $runId.'
@@ -886,6 +928,15 @@ int _show(DocContext context) {
     );
   for (final line in timelineComparison(run)) {
     context.out.writeln(line);
+  }
+  if (run.judgment != null) {
+    context.out.writeln('');
+    for (final line in timelineJudgmentLines(
+      run,
+      TimelineJudgment.fromJson(run.judgment!),
+    )) {
+      context.out.writeln(line);
+    }
   }
   return 0;
 }
@@ -1001,4 +1052,143 @@ Future<int> _clean(DocContext context) async {
   run.status = 'cleaned';
   _save(context, run);
   return 0;
+}
+
+/// `doc timelines judge <run-id>`: (re)judge a saved run.
+Future<int> _judgeCommand(DocContext context) async {
+  final rest = context.args.rest;
+  if (rest.length != 3) {
+    throw const _Abort('Usage: doc timelines judge <run-id> [--json]', 2);
+  }
+  if (context.router.localOnly) {
+    throw const _Abort(
+      '--local refuses doc timelines judge: the judge is Muse Wonder on Meta.',
+    );
+  }
+  final run = _load(context, rest[2]);
+  final json = context.args['json'] as bool;
+  void say(String line) => json ? context.log(line) : context.out.writeln(line);
+  for (final line in timelineComparison(run)) {
+    say(line);
+  }
+  say('');
+  final judged = await _judge(context, run, say);
+  _save(context, run);
+  if (json) context.out.writeln(jsonEncode(run.toJson()));
+  return judged ? 0 : 1;
+}
+
+/// Ask the judge role (Muse Wonder) to rank [run]'s timelines, validate
+/// the answer (one retry), store it in [run] and print it as advice. The
+/// diffs come from git (read-only) and are redacted with the rest of the
+/// prompt. A failed call is reported and leaves the run unjudged.
+Future<bool> _judge(
+  DocContext context,
+  TimelineRun run,
+  void Function(String) say,
+) async {
+  final base = run.baseCommit;
+  if (base == null || run.timelines.every((t) => t.commit == null)) {
+    say('No finished timelines to judge.');
+    return false;
+  }
+  final diffs = <int, String>{};
+  for (final t in run.timelines) {
+    if (t.commit == null || t.files.isEmpty) continue;
+    final where = Directory(t.worktree).existsSync() ? t.worktree : run.repo;
+    diffs[t.k] = await _git(context, where, [
+      'diff',
+      '--patch',
+      '--unified=3',
+      base,
+      t.commit!,
+    ], allowFailure: true);
+  }
+  final messages = [
+    const ChatMessage('system', timelineJudgeSystemPrompt),
+    ChatMessage('user', timelineJudgeMessage(run, diffs)),
+  ];
+  final format = timelineJudgeFormat([for (final t in run.timelines) t.k]);
+  TimelineJudgment? judgment;
+  TimelineJudgment? fallback;
+  String? problem;
+  var sent = messages;
+  var cost = 0.0;
+  var promptTokens = 0;
+  var completionTokens = 0;
+  RoleCallResult? call;
+  for (var attempt = 1; attempt <= 2 && judgment == null; attempt++) {
+    try {
+      call = await context.router.call(
+        'judge',
+        sent,
+        maxTokens: timelinePlannerMaxTokens,
+        responseFormat: format,
+      );
+    } on ModelCallException catch (error) {
+      context.log(
+        'No judgment: ${explainFailure(error, context.config.providers[error.provider] ?? context.router.resolve('judge').provider, role: 'judge')} The comparison above stands; pick with doc timelines pick.',
+      );
+      return false;
+    }
+    cost += call.costUsd;
+    promptTokens += call.result.promptTokens;
+    completionTokens += call.result.completionTokens;
+    try {
+      judgment = parseTimelineJudgment(call.result.content, run);
+    } on TimelineJudgeRefused catch (error) {
+      problem = error.message;
+      if (error.failedRecommendation) fallback = error.ranking;
+      if (attempt == 1) {
+        context.log(
+          'The judgment could not be used ($problem) Asking once more.',
+        );
+        sent = [
+          ...messages,
+          ChatMessage('assistant', call.result.content),
+          ChatMessage(
+            'user',
+            'That answer was not usable: $problem Answer again with only the JSON object.',
+          ),
+        ];
+      }
+    }
+  }
+  if (judgment == null && fallback != null) {
+    // The ranking is valid; only the recommendation named a timeline whose
+    // tests failed, twice. Show it with no recommendation.
+    judgment = TimelineJudgment(
+      fallback.ranking,
+      null,
+      fallback.summary,
+      note:
+          'Doc dropped Wonder\'s recommendation: it named a timeline whose tests did not pass ($problem)',
+    );
+  }
+  if (judgment == null) {
+    context.log(
+      'No judgment: Wonder\'s answer was unusable twice ($problem). The comparison above stands; pick with doc timelines pick.',
+    );
+    return false;
+  }
+  run.judgment = {
+    ...judgment.toJson(),
+    'provider': call!.result.provider,
+    'model': call.result.model,
+    'promptTokens': promptTokens,
+    'completionTokens': completionTokens,
+    'costUsd': cost,
+    'redactionCount': call.redactionCount,
+    'judgedAt': DateTime.now().toUtc().toIso8601String(),
+  };
+  say(
+    'Judgment (${call.result.provider} ${call.result.model}; $promptTokens in / $completionTokens out; \$${cost.toStringAsFixed(4)}; ${call.redactionCount} item(s) redacted):',
+  );
+  for (final line in timelineJudgmentLines(run, judgment)) {
+    say(line);
+  }
+  say(
+    'Advice only: nothing was applied. Pick with doc timelines pick ${run.id} <k>.',
+  );
+  return true;
 }

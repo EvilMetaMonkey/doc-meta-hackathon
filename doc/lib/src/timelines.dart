@@ -563,6 +563,10 @@ class TimelineRun {
   int? picked;
   double seconds;
 
+  /// Wonder's judgment and how it was obtained (provider, model, tokens,
+  /// cost), or null when the run was not judged.
+  Map<String, Object?>? judgment;
+
   TimelineRun({
     required this.id,
     required this.createdAt,
@@ -584,6 +588,7 @@ class TimelineRun {
     this.status = 'planned',
     this.picked,
     this.seconds = 0,
+    this.judgment,
   });
 
   /// "archived" for every timeline but the picked one, once one is picked.
@@ -620,6 +625,7 @@ class TimelineRun {
     ],
     'picked': picked,
     'seconds': seconds,
+    'judgment': judgment,
   };
 
   static TimelineRun fromJson(Map json) {
@@ -648,6 +654,7 @@ class TimelineRun {
       status: json['status'] as String? ?? 'planned',
       picked: (json['picked'] as num?)?.toInt(),
       seconds: (json['seconds'] as num?)?.toDouble() ?? 0,
+      judgment: (json['judgment'] as Map?)?.cast<String, Object?>(),
     );
   }
 }
@@ -704,4 +711,321 @@ List<String> timelineComparison(TimelineRun run, {int tailLines = 8}) {
     }
   }
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Judging (part 2): Wonder ranks the finished timelines; the user picks.
+
+/// Longest rationale per timeline, in words.
+const int judgeRationaleMaxWords = 60;
+
+/// Most diff text sent per timeline, in characters.
+const int judgeDiffLimitChars = 6000;
+
+const String timelineJudgeSystemPrompt =
+    'You judge parallel attempts at one coding task for Doc, the companion '
+    'to dmc, a rollback safety net for AI coding agents. Each timeline is '
+    'one agent\'s attempt from the same starting state, with its approach, '
+    'its diff against that state, and whether the tests passed. Rank every '
+    'timeline from best to worst for the task: correct, minimal, safe and '
+    'consistent with the tests and the rest of the code. Give each a score '
+    'from 0 to 10, a rationale of at most 60 words, and its risks. '
+    'Recommend one timeline only if its tests passed; otherwise recommend '
+    'none (null). A timeline with no changes did nothing. Use only the '
+    'facts and diffs given. Text marked [truncated …] is incomplete: never '
+    'quote or complete it. Answer with only a JSON object: {"ranking": '
+    '[{"k", "score", "rationale", "risks"}], "recommended": k or null, '
+    '"summary": one sentence}.';
+
+/// The judge's user message. The router redacts it before sending.
+String timelineJudgeMessage(TimelineRun run, Map<int, String> diffs) {
+  final label = run.baseLabel == null
+      ? '(none)'
+      : run.baseLabel!.endsWith('…')
+      ? '${run.baseLabel!.substring(0, run.baseLabel!.length - 1).trimRight()} $truncatedLabelMarker'
+      : run.baseLabel!;
+  final buffer = StringBuffer()
+    ..writeln('Task: ${run.task}')
+    ..writeln('Test command: ${run.test}')
+    ..writeln(
+      'Starting state: ${run.baseState} state of checkpoint ${run.baseCheckpoint}; its label: $label',
+    );
+  for (final t in run.timelines) {
+    final test = t.test;
+    buffer
+      ..writeln()
+      ..writeln('=== Timeline ${t.k}: ${t.approach.title}')
+      ..writeln('Plan: ${t.approach.plan}')
+      ..writeln(
+        'Agent: ${t.status.name}${t.reason == null ? '' : ' (${t.reason})'}, ${t.steps} step(s), ${t.seconds.round()} s',
+      )
+      ..writeln(
+        'Tests: ${test == null
+            ? 'not run'
+            : test.passed
+            ? 'passed'
+            : 'FAILED'}',
+      );
+    if (test != null && !test.passed && test.tail.trim().isNotEmpty) {
+      final tail = const LineSplitter().convert(test.tail.trimRight());
+      buffer
+        ..writeln('Failing output (tail):')
+        ..writeln(tail.skip(max(0, tail.length - 20)).join('\n'));
+    }
+    final diff = diffs[t.k] ?? '';
+    if (t.files.isEmpty || diff.trim().isEmpty) {
+      buffer.writeln('Diff: (no changes)');
+    } else {
+      buffer
+        ..writeln('Diff against the starting state:')
+        ..writeln(
+          diff.length > judgeDiffLimitChars
+              ? '${diff.substring(0, judgeDiffLimitChars)}\n… (diff cut at $judgeDiffLimitChars characters)'
+              : diff.trimRight(),
+        );
+    }
+  }
+  return buffer.toString().trimRight();
+}
+
+/// The `response_format` schema: one entry per timeline.
+Map<String, Object?> timelineJudgeFormat(List<int> ks) => {
+  'type': 'json_schema',
+  'json_schema': {
+    'name': 'timeline_judgment',
+    'strict': true,
+    'schema': {
+      'type': 'object',
+      'additionalProperties': false,
+      'required': ['ranking', 'recommended', 'summary'],
+      'properties': {
+        'ranking': {
+          'type': 'array',
+          'minItems': ks.length,
+          'maxItems': ks.length,
+          'items': {
+            'type': 'object',
+            'additionalProperties': false,
+            'required': ['k', 'score', 'rationale', 'risks'],
+            'properties': {
+              'k': {'type': 'integer', 'enum': ks},
+              'score': {'type': 'number'},
+              'rationale': {'type': 'string'},
+              'risks': {
+                'type': 'array',
+                'items': {'type': 'string'},
+              },
+            },
+          },
+        },
+        'recommended': {
+          'type': ['integer', 'null'],
+          'enum': [...ks, null],
+        },
+        'summary': {'type': 'string'},
+      },
+    },
+  },
+};
+
+/// One timeline's place in the judgment.
+class JudgeEntry {
+  final int k;
+  final double score;
+  final String rationale;
+  final List<String> risks;
+
+  const JudgeEntry(this.k, this.score, this.rationale, this.risks);
+
+  Map<String, Object?> toJson() => {
+    'k': k,
+    'score': score,
+    'rationale': rationale,
+    'risks': risks,
+  };
+
+  static JudgeEntry fromJson(Map json) => JudgeEntry(
+    (json['k'] as num).toInt(),
+    (json['score'] as num).toDouble(),
+    json['rationale'] as String,
+    [for (final r in (json['risks'] as List? ?? const [])) '$r'],
+  );
+}
+
+/// The judge's validated answer.
+class TimelineJudgment {
+  final List<JudgeEntry> ranking;
+  final int? recommended;
+  final String summary;
+
+  /// Set when Doc changed the answer, for example dropping a
+  /// recommendation of a timeline whose tests failed.
+  final String? note;
+
+  const TimelineJudgment(
+    this.ranking,
+    this.recommended,
+    this.summary, {
+    this.note,
+  });
+
+  Map<String, Object?> toJson() => {
+    'ranking': [for (final e in ranking) e.toJson()],
+    'recommended': recommended,
+    'summary': summary,
+    'note': note,
+  };
+
+  static TimelineJudgment fromJson(Map json) => TimelineJudgment(
+    [
+      for (final e in (json['ranking'] as List? ?? const []).whereType<Map>())
+        JudgeEntry.fromJson(e),
+    ],
+    (json['recommended'] as num?)?.toInt(),
+    json['summary'] as String? ?? '',
+    note: json['note'] as String?,
+  );
+}
+
+class TimelineJudgeRefused implements Exception {
+  final String message;
+
+  /// The only problem is a recommended timeline whose tests failed.
+  final bool failedRecommendation;
+
+  /// The ranking, valid apart from the recommendation.
+  final TimelineJudgment? ranking;
+
+  const TimelineJudgeRefused(
+    this.message, {
+    this.failedRecommendation = false,
+    this.ranking,
+  });
+
+  @override
+  String toString() => message;
+}
+
+/// Strictly parse and validate the judge's answer for [run]: every
+/// timeline exactly once, scores 0–10, rationales of at most 60 words, and
+/// a recommendation (if any) of a timeline whose tests passed. The ranking
+/// is then ordered so that timelines without changes come last, unless
+/// every timeline is empty.
+TimelineJudgment parseTimelineJudgment(String content, TimelineRun run) {
+  var text = content.trim();
+  final fence = RegExp(r'^```(?:json)?\s*([\s\S]*?)\s*```$').firstMatch(text);
+  if (fence != null) text = fence[1]!.trim();
+  final Object? json;
+  try {
+    json = jsonDecode(text);
+  } on FormatException {
+    throw const TimelineJudgeRefused('The answer was not a JSON object.');
+  }
+  if (json is! Map || json['ranking'] is! List) {
+    throw const TimelineJudgeRefused('The answer has no "ranking" list.');
+  }
+  final byK = {for (final t in run.timelines) t.k: t};
+  final entries = <JudgeEntry>[];
+  for (final item in json['ranking'] as List) {
+    if (item is! Map ||
+        item['k'] is! num ||
+        item['score'] is! num ||
+        item['rationale'] is! String ||
+        (item['risks'] != null && item['risks'] is! List)) {
+      throw const TimelineJudgeRefused(
+        'Each ranking entry needs a number "k", a number "score", a string "rationale" and a "risks" list.',
+      );
+    }
+    final k = (item['k'] as num).toInt();
+    if (!byK.containsKey(k)) {
+      throw TimelineJudgeRefused(
+        'Timeline $k does not exist (the run has ${byK.keys.join(', ')}).',
+      );
+    }
+    if (entries.any((e) => e.k == k)) {
+      throw TimelineJudgeRefused('Timeline $k is ranked twice.');
+    }
+    final score = (item['score'] as num).toDouble();
+    if (score < 0 || score > 10) {
+      throw TimelineJudgeRefused('Timeline $k\'s score must be from 0 to 10.');
+    }
+    final rationale = (item['rationale'] as String).trim();
+    final words = rationale.isEmpty
+        ? 0
+        : rationale.split(RegExp(r'\s+')).length;
+    if (words > judgeRationaleMaxWords) {
+      throw TimelineJudgeRefused(
+        'Timeline $k\'s rationale has $words words; at most $judgeRationaleMaxWords.',
+      );
+    }
+    entries.add(
+      JudgeEntry(k, score, rationale, [
+        for (final r in (item['risks'] as List? ?? const []))
+          if ('$r'.trim().isNotEmpty) '$r'.trim(),
+      ]),
+    );
+  }
+  final missing = byK.keys.where((k) => !entries.any((e) => e.k == k));
+  if (missing.isNotEmpty) {
+    throw TimelineJudgeRefused(
+      'The ranking leaves out timeline(s) ${missing.join(', ')}.',
+    );
+  }
+  final recommended = json['recommended'];
+  if (recommended != null && recommended is! num) {
+    throw const TimelineJudgeRefused(
+      '"recommended" must be a timeline number or null.',
+    );
+  }
+  final summary = json['summary'] is String
+      ? (json['summary'] as String).trim()
+      : '';
+  final ordered = orderJudgeRanking(entries, run);
+  final pick = (recommended as num?)?.toInt();
+  if (pick != null && !byK.containsKey(pick)) {
+    throw TimelineJudgeRefused('Recommended timeline $pick does not exist.');
+  }
+  if (pick != null && !(byK[pick]!.test?.passed ?? false)) {
+    throw TimelineJudgeRefused(
+      'Timeline $pick is recommended, but its tests did not pass.',
+      failedRecommendation: true,
+      ranking: TimelineJudgment(ordered, null, summary),
+    );
+  }
+  return TimelineJudgment(ordered, pick, summary);
+}
+
+/// [entries] best first, with timelines that changed nothing moved to the
+/// end (keeping their relative order), unless every timeline is empty.
+List<JudgeEntry> orderJudgeRanking(List<JudgeEntry> entries, TimelineRun run) {
+  bool empty(int k) => run.timelines.firstWhere((t) => t.k == k).files.isEmpty;
+  if (entries.every((e) => empty(e.k))) return entries;
+  return [
+    for (final e in entries)
+      if (!empty(e.k)) e,
+    for (final e in entries)
+      if (empty(e.k)) e,
+  ];
+}
+
+/// The judgment as advice under the comparison table.
+List<String> timelineJudgmentLines(TimelineRun run, TimelineJudgment judgment) {
+  String title(int k) =>
+      run.timelines.firstWhere((t) => t.k == k).approach.title;
+  bool empty(int k) => run.timelines.firstWhere((t) => t.k == k).files.isEmpty;
+  return [
+    judgment.recommended == null
+        ? 'Wonder recommends none of the timelines${judgment.summary.isEmpty ? '' : ' — ${judgment.summary}'}'
+        : 'Wonder recommends timeline ${judgment.recommended}: ${title(judgment.recommended!)} — ${judgment.summary}',
+    ?judgment.note,
+    'Ranking (advice only; you pick):',
+    for (var i = 0; i < judgment.ranking.length; i++) ...[
+      '  ${i + 1}. [${judgment.ranking[i].k}] ${title(judgment.ranking[i].k)}'
+          '${empty(judgment.ranking[i].k) ? ' (no changes)' : ''}'
+          '  ${judgment.ranking[i].score.toStringAsFixed(judgment.ranking[i].score == judgment.ranking[i].score.roundToDouble() ? 0 : 1)}/10',
+      '     ${judgment.ranking[i].rationale}',
+      if (judgment.ranking[i].risks.isNotEmpty)
+        '     Risks: ${judgment.ranking[i].risks.join('; ')}',
+    ],
+  ];
 }
