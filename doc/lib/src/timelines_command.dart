@@ -473,7 +473,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   // The agents' model: --agent-model, else Muse Code's configured default.
   final agentModel = (args['agent-model'] as String?)?.trim();
   final configured = agentModel == null || agentModel.isEmpty
-      ? museConfiguredModel(_museSettings(context.env))
+      ? museConfiguredModel(readMuseSettings(context.env))
       : null;
   final model = (agentModel != null && agentModel.isNotEmpty)
       ? agentModel
@@ -1236,7 +1236,7 @@ Future<bool> _judge(
 
 /// Muse Code's user settings (read-only, for its default model):
 /// `$XDG_CONFIG_HOME/muse/settings.json`, else `~/.config/muse/settings.json`.
-String? _museSettings(Map<String, String> env) {
+String? readMuseSettings(Map<String, String> env) {
   final xdg = env['XDG_CONFIG_HOME'];
   final home = env['HOME'] ?? env['USERPROFILE'];
   final path = xdg != null && xdg.isNotEmpty

@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import 'config.dart';
 import 'dmc_client.dart';
+import 'doctor_command.dart';
 import 'bisect_command.dart';
 import 'lesson_commands.dart';
 import 'restore_command.dart';
@@ -34,6 +35,11 @@ Commands:
   usage                            Tokens, audio seconds and estimated cost per
                                    provider.
   status                           The latest checkpoints, from dmc's JSON.
+  doctor [--check]                 Is everything set up? dmc, hooks, keys (never
+                                   values) and roles, Modal, the microphone tool
+                                   and Muse Code's model, each with its fix. No
+                                   model calls unless --check (one tiny prompt
+                                   per provider; wakes Glimmer).
   timelines "<task>" --test "<command>" [--from <cp> --state before|after]
          [--n 3] [--setup "<command>"] [--link <dir>]... [--max-steps <n>]
          [--timeout <minutes>] [--yes] [--json]
@@ -244,6 +250,8 @@ Future<int> runDoc(
         return await runTalkCommand(context, voice ?? const VoiceDeps());
       case 'status':
         return await _status(context);
+      case 'doctor':
+        return await runDoctorCommand(context);
       case 'timelines':
         return await runTimelinesCommand(
           context,
