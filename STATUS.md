@@ -38,7 +38,7 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
     cost $0.81, not Contributor-mode cents;
   - `pick` writes the patch to Doc's run folder and prints `git apply` (`git apply --3way` refuses
     files with uncommitted changes).
-- **Tests:** Doc 176 (was 162):
+- **Tests:** Doc 177 (was 162):
   - 6 pure judge tests: valid, invalid k / duplicates / missing / bad fields, failed
     recommendation, empty last, the prompt, JSON;
   - 5 CLI judge and `--from-bisect` tests: advice and redaction, an unknown k retried, a failed
@@ -46,9 +46,16 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
     bisect;
   - 1 estimate/`--agent-model` CLI test and 1 pure estimate test;
   - 2 voice tests: the routing plan, and `--yes` not answering for timelines;
-  - the pick test now checks the printed `git apply` works on a dirty working copy.
-- **Gates:** `tool/setup_dmc.dart` applied 31/31 patches; Doc analyzer clean, 176 tests passed.
+  - the pick test now checks the printed `git apply` works on a dirty working copy;
+  - 1 test for the bisect store's file name.
+- **Gates:** `tool/setup_dmc.dart` applied 31/31 patches; Doc analyzer clean, 177 tests passed.
   dmc unchanged.
+- **Windows fix found by CI:** the bisect store named its file after the first 24 characters of
+  the workspace fingerprint (`sha256:…`), and Windows forbids the colon (9 Doc tests failed on
+  windows-latest in the first runs of `4162710`). It now uses the hex part, as the lessons do.
+- **CI:** PR #1 (`timelines-2`) passed on ubuntu, windows, macos-latest and macos-15-intel in
+  both the push and pull_request runs for `690c62e`. setup_dmc applied 31/31 patches; dmc ran
+  223 tests (Windows 221 plus 2 skipped) and 3 contract tests; Doc ran 177 on every platform.
 - **Real run of demo/RUNBOOK.md** on the Mac, 2026-10-31, in `/tmp/doc-demo` (both hooks):
   - Setup and warm-up: `make_demo_repo` about 1 s; `doc models --check` 121 s (cold Glimmer
     113 s).
@@ -678,7 +685,7 @@ Newest first. One entry per session: date, agent, what changed, and anything lef
 - 2026-10-31 · Claude · Timelines part 2 and demo (branch `timelines-2`): Wonder judging with
   validated JSON, `--from-bisect`, the voice timelines route, the model-aware estimate and
   `--agent-model`, `pick` writing a patch for plain `git apply`, `demo/make_demo_repo.dart` and
-  `demo/RUNBOOK.md`. Verified with 176 Doc tests and a real end-to-end runbook run (Muse Code
+  `demo/RUNBOOK.md`. Verified with 177 Doc tests and a real end-to-end runbook run (Muse Code
   $0.81 on Wonder, the rest under $0.10 plus Modal). Left open: recording the video, and the
   parity items.
 
