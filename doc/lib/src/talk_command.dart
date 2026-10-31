@@ -497,6 +497,10 @@ Future<int> runTalkCommand(DocContext context, VoiceDeps deps) async {
       }
     }
     commandArgs = ['bisect', '--test', test];
+  } else if (action.command == VoiceCommand.timelines) {
+    // The workspace's bisectTest, else the test the last bisect used.
+    final test = await _bisectTest(context);
+    if (test != null) commandArgs = [...commandArgs, '--test', test];
   }
 
   final yes = args['yes'] as bool;

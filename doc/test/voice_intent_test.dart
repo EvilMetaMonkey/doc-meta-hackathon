@@ -99,6 +99,13 @@ void main() {
       ]);
       expect(plan(VoiceCommand.lessonBrief).args.last, 'spoken words');
       expect(plan(VoiceCommand.lessons).command.alwaysAsk, isFalse);
+      expect(plan(VoiceCommand.timelines, 'fix the failing test').args, [
+        'timelines',
+        'fix the failing test',
+        '--from-bisect',
+      ]);
+      expect(plan(VoiceCommand.timelines).args[1], 'spoken words');
+      expect(plan(VoiceCommand.timelines).command.alwaysAsk, isTrue);
     });
   });
 
@@ -124,6 +131,7 @@ void main() {
       'lessons',
       'bisect',
       'status',
+      'timelines',
       'unknown',
     ]);
     expect(voiceCapabilities(), contains('find the turn that broke the tests'));

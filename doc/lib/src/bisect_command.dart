@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import 'abandoned_work.dart';
 import 'bisect.dart';
+import 'bisect_store.dart';
 import 'cli.dart';
 import 'dmc_client.dart';
 import 'model_client.dart';
@@ -173,6 +174,7 @@ Future<int> runBisectCommand(DocContext context) async {
 
   final DmcClient dmc;
   final String root;
+  final String fingerprint;
   final List<BisectCheckpoint> ordered;
   try {
     dmc = await context.dmc();
@@ -187,6 +189,7 @@ Future<int> runBisectCommand(DocContext context) async {
       return 1;
     }
     root = (listed['workspace'] as Map)['path'] as String;
+    fingerprint = (listed['workspace'] as Map)['fingerprint'] as String;
     ordered =
         [
           for (final item
@@ -437,6 +440,15 @@ Future<int> runBisectCommand(DocContext context) async {
     'lastGood': lastGoodPoint.toJson(),
     'failingOutputTail': failing,
   };
+  // For doc timelines --from-bisect.
+  saveLastBisect(context.env, fingerprint, {
+    'savedAt': DateTime.now().toUtc().toIso8601String(),
+    'workspace': root,
+    'test': test,
+    'setup': setup,
+    'links': links,
+    ...result,
+  });
   if (!json) {
     say('');
     say('First bad turn: ${bad.id}');

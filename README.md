@@ -18,10 +18,10 @@ Muse models on top of that record, as one loop:
 1. **Find it.** `doc bisect --test "<command>"` runs your tests on exported checkpoint states
    (never your working copy) to find the turn where they started failing, and Muse Spark explains
    why.
-2. **Fix it.** `doc timelines "<task>" --test "<command>"`: Muse Wonder plans three different
-   approaches, three Muse Code agents try them in separate Git worktrees, and Doc runs the tests
-   in each and compares them side by side. You pick one; the others stay as branches. Nothing is
-   merged for you.
+2. **Fix it.** `doc timelines "<task>" --from-bisect`: Muse Wonder plans three different
+   approaches, three Muse Code agents try them in separate Git worktrees, Doc runs the tests in
+   each and compares them side by side, and Wonder judges the results. You pick one; the others
+   stay as branches. Nothing is merged for you.
 3. **Remember it.** `doc restore` undoes a turn through dmc, then drafts a lesson from the undone
    work. Approved lessons are offered to the next agent that touches the same files
    (`doc start`).
@@ -43,7 +43,7 @@ anything is restored, run or sent to a model. Secrets are redacted before any ho
 | Muse Code | local CLI (`muse exec`) | The agent in each parallel timeline, and a demo agent |
 | Muse Spark 1.3 (`muse-spark-1.3`) | Meta Model API | Natural-language restore |
 | Muse Spark Open (`meta-models/muse-spark-open-1026`) | Baseten, with Fireworks as the backup | Lesson drafts, bisect explanations, voice routing; fallback for summaries and restore |
-| Muse Wonder (`muse-wonder-1.0`) | Meta Model API | Plans the parallel timelines (judging comes next) |
+| Muse Wonder (`muse-wonder-1.0`) | Meta Model API | Plans the parallel timelines and judges the results (advice; you pick) |
 | Muse Glimmer 30B (`meta-models/Muse-Glimmer-30B`) | A private deployment on Modal (vLLM, one L40S; [`deploy/modal/`](deploy/modal/)) | Checkpoint summaries and lesson briefs |
 | Muse Voice Transcribe (`muse-voice-transcribe-1.0`) | Meta Model API, realtime WebSocket | "Hey Doc" push-to-talk |
 
@@ -93,6 +93,19 @@ cd doc && dart pub get --enforce-lockfile && dart analyze --fatal-infos \
   && DMC_TEST_BIN=../.deps/dmc/build/dmc/bundle/bin/dmc dart test --concurrency=1
 ```
 
+## Demo
+
+[`demo/RUNBOOK.md`](demo/RUNBOOK.md) is the 3-minute video script. It was run end to end on
+2026-10-31, and it records the exact agent prompts and the timings of each step.
+
+1. `dart run demo/make_demo_repo.dart /tmp/doc-demo` builds a small Python shop with tests, a dmc
+   vault and (after asking) both agents' hooks.
+2. Four scripted Claude Code and Muse Code turns follow, one of which breaks the tests.
+3. Then `doc bisect` → `doc timelines --from-bisect` → Wonder's recommendation → `doc timelines
+   pick` → `git apply` → tests pass → a lesson → `doc start` with the brief.
+
+It includes the "Hey Doc" voice variants.
+
 ## Layout
 
 | Path | What it is |
@@ -100,6 +113,7 @@ cd doc && dart pub get --enforce-lockfile && dart analyze --fatal-infos \
 | [`doc/`](doc/) | Doc, a Dart package (`dmc_doc`, executable `doc`): every model call, and all the commands above |
 | [`dmc-patches/`](dmc-patches/), [`PATCHES.md`](PATCHES.md) | The event's changes to dmc, as a `git format-patch` series against dmc `d177c4b` |
 | [`tool/setup_dmc.dart`](tool/setup_dmc.dart), [`tool/export_patches.dart`](tool/export_patches.dart) | Set up `.deps/dmc` from the patches; regenerate the patches after an engine change |
+| [`demo/`](demo/) | The demo repository script and the video runbook |
 | [`deploy/modal/`](deploy/modal/) | The Muse Glimmer deployment on Modal |
 | [`docs/AGENT-HOOKS.md`](docs/AGENT-HOOKS.md) | Verified Muse Code and Claude Code hook facts |
 | [`HACKATHON.md`](HACKATHON.md), [`STATUS.md`](STATUS.md) | What is pre-existing and what was built during the event; the running build status |
