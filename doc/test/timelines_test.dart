@@ -498,4 +498,19 @@ void main() {
       expect(back.judgment, {'recommended': 1, 'summary': 's', 'ranking': []});
     });
   });
+
+  test('the last bisect is stored under a name valid on every platform', () {
+    final file = lastBisectFile(const {
+      'DOC_DATA_DIR': '/data',
+    }, 'sha256:ea9ff4b975655c30c1234567890abcdef');
+    expect(
+      file.path.split(RegExp(r'[/\\]')).last,
+      'ea9ff4b975655c30c1234567.json',
+    );
+    expect(file.path, isNot(contains(':')));
+    expect(
+      () => lastBisectFile(const {'DOC_DATA_DIR': '/d'}, 'nonsense'),
+      throwsFormatException,
+    );
+  });
 }

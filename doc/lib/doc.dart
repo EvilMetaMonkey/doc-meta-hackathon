@@ -4,6 +4,7 @@ library;
 export 'src/abandoned_work.dart';
 export 'src/bisect.dart';
 export 'src/bisect_command.dart';
+export 'src/bisect_store.dart';
 export 'src/cli.dart';
 export 'src/config.dart';
 export 'src/dmc_client.dart';
