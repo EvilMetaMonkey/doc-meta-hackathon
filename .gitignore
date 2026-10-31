@@ -1,0 +1,6 @@
+# dmc, cloned and patched by tool/setup_dmc.dart
+.deps/
+build/
+.dart_tool/
+__pycache__/
+*.pyc
