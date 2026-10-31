@@ -36,6 +36,17 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
     unset.
   - **Verified:** in the new layout, dmc analyzer clean, 223 dmc tests and 3 Haven contract tests
     in `.deps/dmc`; Doc analyzer clean, 162 tests.
+  - **Fresh clone:** a fresh clone of the pushed repository, following only the README's setup
+    steps, applied 31/31 patches. dmc analyzer clean, 223 + 3 tests; Doc analyzer clean, 162
+    tests.
+  - **Blob check:** of the 214 blobs in the new repository's full history, the only one that
+    matches the 97 pre-event blobs of the `pre-hackathon` tree is `LICENSE`. That is the generic
+    MIT text with the same copyright line, rewritten for this repository.
+  - **CI:** on `6387cc8`, CI passed on ubuntu, windows, macos-latest and macos-15-intel:
+    setup_dmc applied 31/31 patches, dmc ran 223 tests (Windows 221 plus 2 skipped) and 3
+    contract tests, and Doc ran 162 tests on every platform. The first run (`5c01910`) was
+    rejected as a workflow-file error (`runner` context in a job-level `env`), fixed in
+    `6387cc8`.
 - Repository created from dmc at the `pre-hackathon` tag (commit `d177c4b`). Everything before the
   tag is pre-existing work; see [HACKATHON.md](HACKATHON.md).
 - Repository marked as the hackathon entry: `HACKATHON.md`, README banner, clone instructions,
