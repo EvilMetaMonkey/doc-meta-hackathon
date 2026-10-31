@@ -13,8 +13,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
-    env:
-      DMC_BUNDLE: ${{ github.workspace }}/.deps/dmc/build/dmc/bundle/bin/${{ runner.os == 'Windows' && 'dmc.exe' || 'dmc' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dart-lang/setup-dart@v1
@@ -44,4 +42,5 @@ jobs:
         run: dart test --concurrency=1
         working-directory: doc
         env:
-          DMC_TEST_BIN: ${{ env.DMC_BUNDLE }}
+          # The bundle tool/setup_dmc.dart built.
+          DMC_TEST_BIN: ${{ github.workspace }}/.deps/dmc/build/dmc/bundle/bin/${{ runner.os == 'Windows' && 'dmc.exe' || 'dmc' }}
