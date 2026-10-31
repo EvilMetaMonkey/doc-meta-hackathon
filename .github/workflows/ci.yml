@@ -1,0 +1,47 @@
+name: CI
+on:
+  push:
+    branches: ['**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gates:
+    name: gates (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    env:
+      DMC_BUNDLE: ${{ github.workspace }}/.deps/dmc/build/dmc/bundle/bin/${{ runner.os == 'Windows' && 'dmc.exe' || 'dmc' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: '3.11.5'
+      # dmc: clone EvilMetaMonkey/dmc at the pinned commit, git am dmc-patches/, build.
+      - name: Set up dmc
+        run: dart run tool/setup_dmc.dart
+      # dmc's own gates, which prove the patches.
+      - name: dmc analyzer
+        run: dart run tool/check_analyzer.dart
+        working-directory: .deps/dmc
+      - name: dmc tests
+        run: dart test --concurrency=1
+        working-directory: .deps/dmc
+      - name: dmc Haven contract tests
+        run: dart test tool/haven_contract_test.dart --concurrency=1
+        working-directory: .deps/dmc
+      # Doc, against the bundle setup_dmc built.
+      - name: Doc dependencies
+        run: dart pub get --enforce-lockfile
+        working-directory: doc
+      - name: Doc analyzer
+        run: dart analyze --fatal-infos
+        working-directory: doc
+      - name: Doc tests
+        run: dart test --concurrency=1
+        working-directory: doc
+        env:
+          DMC_TEST_BIN: ${{ env.DMC_BUNDLE }}
