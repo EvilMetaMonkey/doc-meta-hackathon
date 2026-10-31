@@ -34,6 +34,7 @@ dart compile exe bin/doc.dart -o ../build/doc
 | `doc usage` | Tokens, audio seconds and estimated cost per provider against the budgets (Modal: calls and tokens; billed by GPU time). |
 | `doc timelines "<task>" --test "<command>" [--from <cp> --state before\|after] [--n 3] [--setup …] [--link <dir>]… [--max-steps <n>] [--timeout <min>] [--yes] [--json]` | Parallel timelines: Muse Wonder plans N approaches, N Muse Code agents try them in separate worktrees, Doc tests and compares them. See "Parallel timelines". |
 | `doc timelines list \| show <run-id> \| judge <run-id> \| pick <run-id> <k> \| clean <run-id>` | Past runs; (re)judge a run with Wonder; the picked timeline's diff, its patch and the git commands to bring it in (Doc runs none); remove worktree folders (never branches). |
+| `doc doctor [--check]` | Is everything set up? Prints an ok/warn/FAIL list, each problem with its fix. See "Doctor". |
 | `doc status` | The latest checkpoints (time, agent, status, changed files, undone or not), from `dmc checkpoint list` JSON. |
 | `doc talk [--file <audio>] [--yes]` (alias `doc hey`) | "Hey Doc" push-to-talk: speak a request, Doc says what it heard and which Doc command it would run, and runs it only after a yes. See "Hey Doc". |
 | `doc bisect --test "<command>" [--setup …] [--link <dir>]… [--from <cp>] [--to <cp>] [--all] [--timeout <s>] [--keep] [--no-explain] [--json]` | Time-travel bisect: find the agent turn where the tests started failing, by testing exported checkpoint states. See "Bisect". |
@@ -298,17 +299,28 @@ diffs, and the user picks one. The other two are archived, never deleted. No aut
 
    The whole prompt is redacted. Wonder answers with `response_format` JSON (verified with the
    nullable `recommended` on 2026-10-31): `{ranking: [{k, score 0–10, rationale (≤60 words),
-   risks}], recommended: k | null, summary}`. `parseTimelineJudgment` (pure) checks:
+   risks, followed_plan: "yes" | "partly" | "no", actual_change (≤25 words)}], recommended: k |
+   null, summary}`. `parseTimelineJudgment` (pure) checks:
    - every k exists and appears exactly once;
    - every score is from 0 to 10, and every rationale is at most 60 words;
+   - every timeline has `followed_plan`, and an `actual_change` of at most 25 words saying what
+     its diff really does (Wonder checks the diff against that timeline's own plan);
    - **a timeline whose tests failed (or did not run) cannot be recommended.** Doc refuses that
      answer and asks once more. If it happens again, the ranking is shown with no recommendation
      and a note.
 
-   Timelines with no changes are ranked last unless every timeline is empty. The advice prints
-   under the comparison ("Wonder recommends timeline k: <title> — <summary>", then the ranking
-   with risks) and is saved in the run JSON. **Nothing is applied; the user picks.** `doc
-   timelines judge <run-id>` (re)judges a saved run.
+   Timelines with no changes are ranked last unless every timeline is empty. Doc judges first,
+   then prints:
+   - the comparison, with a "did (per Wonder): …" line per timeline;
+   - "Wonder recommends timeline k: <title> — <summary>";
+   - the ranking, where each entry shows "Planned: <approach> / Did: <actual change>", the
+     rationale and the risks. A timeline that strayed is flagged "DIDN'T FOLLOW ITS PLAN" (or
+     "ONLY PARTLY …"), and a recommended one that strayed gets a note.
+
+   Doc never changes the scores: Wonder judges. (Added after a real run in which timeline 1,
+   "Migrate checkout callers to the new discount API", changed `apply_discount` back to percents
+   instead, and nothing showed it.) The judgment is saved in the run JSON. **Nothing is applied;
+   the user picks.** `doc timelines judge <run-id>` (re)judges a saved run.
 9. **Pick and archive, no auto-merge.**
    - `doc timelines pick <run-id> <k>` shows that timeline's full diff against the base (a
      read-only `git diff`). It writes it as `pick-<k>.patch` in the run's folder in Doc's data
@@ -393,6 +405,50 @@ Muse Code: $0.0110 (from each run's reported tokens); planner: $0.0162.
 unchanged, and the printed patch passed `git apply --check`. **Note:** the before-state of the
 first bad turn passes its tests by definition, so "fix the bug" fits the after-state. From the
 before-state, the task should be the bad turn's own goal, done in a way the tests accept.
+
+## Doctor
+
+`doc doctor` is one command to run after setup. Each line is `ok`, `warn` or `FAIL`, and each
+problem comes with its fix; failures exit 1. Without `--check` it makes **no model calls**. It
+checks:
+
+- **dmc:** found (`--dmc`, `DMC_BIN`, `PATH`), its version, and whether it has `disable` and
+  `hooks status --json`; and whether the current folder is a dmc workspace.
+- **Agent hooks**, through `dmc hooks status --json`: Claude Code (local scope, per repository)
+  and Muse Code (user scope). It reports missing events, and hooks from another dmc build (fix:
+  `dmc disable --apply`, then `dmc hooks install`).
+- **Each provider in use:** its key variable set or not (never the value) and the roles it
+  serves. A missing key is FAIL for a primary provider and warn for a fallback. Modal:
+  - with no endpoint configured, a warning (summary falls back to Baseten);
+  - with one, "endpoint configured" (the URL is never printed).
+- **`--check`** sends one tiny prompt to each provider in use, like `doc models --check`. For
+  Modal it says first "if Glimmer is cold, the first call takes about 2 minutes", and afterwards
+  whether Glimmer was cold and is warm now.
+- **The microphone tool** for `doc talk`: `rec` (SoX), or ffmpeg with AVFoundation on macOS
+  (whose first use asks for microphone permission).
+- **Muse Code:** its version and the timeline agents' model (Muse Code's configured default), with
+  the estimated cost of a `doc timelines` run at the defaults. Also Claude Code.
+
+Real output on Mike's Mac, 2026-10-31, in the demo repository:
+
+```text
+Doc doctor (no model calls; add --check to call each provider)
+  ok    dmc: ~/Projects/doc-meta-hackathon/.deps/dmc/build/dmc/bundle/bin/dmc (dmc 1.1.0-dev.5.1)
+  ok    dmc workspace: /private/tmp/doc-demo
+  ok    Hooks (Claude Code, local): installed (4 events)
+  ok    Hooks (Muse Code, user): installed (5 events)
+  ok    meta: MODEL_API_KEY set; roles: restore, planner, judge, voice
+  ok    baseten: BASETEN_API_KEY set; roles: summary (fallback), workhorse, restore (fallback)
+  ok    fireworks: FIREWORKS_API_KEY set; roles: workhorse (fallback)
+  ok    modal: MODAL_GLIMMER_KEY set; endpoint configured; roles: summary
+  ok    Microphone: ffmpeg (AVFoundation) for doc talk; macOS asks for microphone permission the first time
+  ok    Muse Code: 1.4.14 (1.4.14-R7309.1); timeline agents use muse-wonder-1.0; doc timelines estimates ≤ $7.92 per run at the defaults (3 agents × 20 steps, no cache discount; real runs are far lower)
+  ok    Claude Code: 2.1.312 (Claude Code)
+11 ok, 0 warning(s), 0 failure(s).
+```
+
+With `--check`, the cold Glimmer answered in 90.9 s ("Glimmer was cold and is warm now"); the
+whole check took 96 s.
 
 ## "Hey Doc": push-to-talk voice
 

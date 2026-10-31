@@ -47,6 +47,7 @@ every commit is dated 2026-10-26 or later.
   - the lesson library and `doc start`;
   - `doc talk`, "Hey Doc" push-to-talk with Muse Voice Transcribe;
   - `doc summarize`;
+  - `doc doctor`, which checks the whole setup and gives each problem's fix;
   - one model client with role routing, logged fallbacks, budgets and secret redaction.
 - **The Muse Glimmer deployment** on Modal ([`deploy/modal/`](deploy/modal/)).
 - **Verified agent-hook research** ([`docs/AGENT-HOOKS.md`](docs/AGENT-HOOKS.md)).
