@@ -3,7 +3,7 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-10-31 by Claude (polish session)
+Last updated: 2026-11-01 by Claude (README session)
 
 **Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
 work only. dmc lives in its own repository and is set up in `.deps/dmc` by
@@ -58,6 +58,9 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
         as "DIDN'T FOLLOW ITS PLAN".
     - Cost: Muse Code $0.012, Wonder $0.046 (planner and judge), plus the two Muse demo turns on
       Wonder (not metered), the `--check` calls (about $0.003) and Modal GPU time.
+  - **CI (PR #2, merged 2026-10-31):** the blocked push of `polish` went through later. CI passed on ubuntu, windows, macos-latest and macos-15-intel in the push and
+    pull_request runs for `732fb8a` (patch 0035 fixed the Windows `hook_doctor` failures on
+    `7b41f91`), and in the push run for the merge `7fe0eac` on main.
   - **Gates:** a clean `setup_dmc` (35/35); dmc analyzer clean, 234 tests, 3 contract tests;
     Doc analyzer clean, 187 tests.
 - **Timelines part 2: Wonder judges** (branch `timelines-2`).
@@ -632,12 +635,7 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 ## In progress
 
-- PR #2 (`polish`) CI: on `7b41f91`, ubuntu, macos-latest and macos-15-intel passed in both the
-  push and pull_request runs; windows-latest failed 3 `hook_doctor` tests (no execute bit on
-  Windows). Patch 0035 fixes it, and locally a clean `setup_dmc` applied 35/35, dmc ran 234 tests
-  and 3 contract tests and Doc 187. Pushing it was refused (HTTP 403, "You must verify your email
-  address" on the GitHub account), so CI has not run on the fix yet. Next: verify the email at
-  https://github.com/settings/emails, push `polish` and wait for CI on all four platforms.
+- Nothing yet.
 
 ## Broken
 
@@ -715,8 +713,8 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
-1. Final README, narration and submission text (Cowork drafts).
-2. Recording the video from demo/RUNBOOK.md (Mike), with a live `doc talk` at the microphone.
+1. Record the video from demo/RUNBOOK.md (Mike), with a live `doc talk` at the microphone.
+2. Add the video's link to README.md's "▶ 3-minute demo" line (it says `<video link>` now).
 3. Submit by Nov 4, 9:00 PM ET.
 
 - Mike: once happy with this repository, make `EvilMetaMonkey/dmc-meta-hackathon` private (or
@@ -733,6 +731,13 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
 
+- 2026-11-01 · Claude · README (branch `readme`): new top section (title, tagline, demo-link
+  placeholder, find/fix/remember, pre-existing work); setup and "try it" steps use `"$DMC_BIN"`
+  (PowerShell form given once) and a `doc` alias (with a PowerShell function). Followed the edited
+  steps in a fresh /tmp clone on the Mac (setup_dmc 35/35, the alias, `"$DMC_BIN" init`,
+  `hooks install` preview, `disable`, `doc doctor`: 9 ok, 2 warnings for hooks not installed, 0
+  failures). The PowerShell lines were not run (no pwsh here). Doc gates: analyzer clean, 187
+  tests. Resolved the stale PR #2 In progress note (merged, CI green on all four platforms).
 - 2026-10-31 · Claude · Polish (branch `polish`): `make_demo_repo` safety and `--help`, plan
   adherence in Wonder's judgment (Planned / Did), `dmc disable` and the `dmc doctor` hook checks
   (patches 0032–0034), `doc doctor`, and the runbook polish. Verified with 234 dmc and 187 Doc
