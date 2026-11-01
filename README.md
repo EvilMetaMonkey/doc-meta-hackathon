@@ -1,12 +1,19 @@
-# Doc: a recovery loop for AI coding agents
+# Doc: find it, fix it, remember it
 
-**Meta AI Developer Hackathon 2026 entry, by Mike Hood ([@EvilMetaMonkey](https://github.com/EvilMetaMonkey)).**
-Everything in this repository was written during the event (from 2026-10-26).
+A recovery loop for AI coding agents, powered by six Meta models.
+Meta AI Developer Hackathon 2026 · indie developer track · by Mike Hood ([@EvilMetaMonkey](https://github.com/EvilMetaMonkey))
 
-**Pre-existing work:** Doc drives [dmc](https://github.com/EvilMetaMonkey/dmc), Mike's
-pre-existing open-source rollback tool for AI coding agents. dmc is not part of this repository.
-It is used as a service Doc calls, set up from its own repository at a pinned pre-event commit,
-plus this event's patches in [`dmc-patches/`](dmc-patches/) (see [PATCHES.md](PATCHES.md)).
+▶ 3-minute demo: <video link>
+
+Coding agents break things before anyone commits. Doc records every agent turn, then:
+
+- **Find it:** `doc bisect` names the turn that broke your tests (4 probes, under a second in the demo).
+- **Fix it:** Muse Wonder plans three fixes, three Muse Code agents try them in parallel worktrees, and Wonder ranks the results. You pick; nothing is merged for you.
+- **Remember it:** an approved lesson opens the next agent session that touches the same files.
+
+The AI never writes your files: every restore goes through dmc's preview-first, journaled path.
+
+**Pre-existing work:** Doc drives [dmc](https://github.com/EvilMetaMonkey/dmc), my open-source rollback tool from before the event. dmc is not in this repository: setup clones it at a pinned pre-event commit and applies this event's patches from [`dmc-patches/`](dmc-patches/) (see [PATCHES.md](PATCHES.md)). Everything in this repository was written during the event (from 2026-10-26).
 
 ## What Doc does
 
@@ -61,13 +68,19 @@ cd doc-meta-hackathon
 #    git am, and build the bundle. Prints the dmc path. Safe to re-run.
 dart run tool/setup_dmc.dart
 
-# 2. Point Doc at it (the setup prints the exact line for your shell).
-export DMC_BIN="$PWD/.deps/dmc/build/dmc/bundle/bin/dmc"      # Windows: .deps\dmc\build\dmc\bundle\bin\dmc.exe
+# 2. Point Doc at it (the setup prints the exact line for your shell). Use "$DMC_BIN" to run dmc:
+#    a bare `dmc` can be another command (macOS ships /usr/bin/dmc).
+export DMC_BIN="$PWD/.deps/dmc/build/dmc/bundle/bin/dmc"
+#    PowerShell: $env:DMC_BIN = "$PWD\.deps\dmc\build\dmc\bundle\bin\dmc.exe"
+
+#    A short `doc` command (run this from the repository root):
+alias doc="dart run $PWD/doc/bin/doc.dart"
+#    PowerShell: $DocDart = "$PWD\doc\bin\doc.dart"; function doc { dart run $DocDart @args }
 
 # 3. Doc.
 cd doc
 dart pub get --enforce-lockfile
-dart run bin/doc.dart doctor          # is everything set up? each problem with its fix (no model calls)
+doc doctor                            # is everything set up? each problem with its fix (no model calls)
 ```
 
 Keys come only from environment variables: `MODEL_API_KEY` (Meta), `BASETEN_API_KEY`, and
@@ -77,13 +90,13 @@ separately.
 
 **To try it on a project:**
 
-1. In the project's Git repository, run `dmc init`.
+1. In the project's Git repository, run `"$DMC_BIN" init` (PowerShell: `& $env:DMC_BIN init`,
+   and the same for the commands below).
 2. Install the agent hooks so each turn becomes a checkpoint:
-   `dmc hooks install --agent muse-code --apply` (and/or `--agent claude-code`).
-3. Use Doc from that folder, for example `dart run <this repo>/doc/bin/doc.dart bisect --test
-   "python3 -m unittest"`.
-4. To turn recording off again, run `dmc disable` (a preview), then `dmc disable --apply`. It
-   removes only dmc's hooks and keeps every checkpoint.
+   `"$DMC_BIN" hooks install --agent muse-code --apply` (and/or `--agent claude-code`).
+3. Use Doc from that folder, for example `doc bisect --test "python3 -m unittest"`.
+4. To turn recording off again, run `"$DMC_BIN" disable` (a preview), then
+   `"$DMC_BIN" disable --apply`. It removes only dmc's hooks and keeps every checkpoint.
 
 **Tests**, the same gates CI runs:
 
