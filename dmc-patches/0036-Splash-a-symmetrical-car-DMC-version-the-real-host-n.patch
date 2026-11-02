@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EvilMetaMonkey <hood.mj85@gmail.com>
+Date: Mon, 2 Nov 2026 15:05:23 -0600
+Subject: [PATCH] Splash: a symmetrical car, DMC <version>, the real host name
+
+Every splash row is now a mirror image of itself (tested with / and \,
+[ and ], ( and ) swapped). The header drops the carmaker's name, the
+status row shows this machine's host name (shortened) instead of a fixed
+one, and no film or carmaker names remain.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CHANGELOG.md      |  1 +
+ lib/src/ui.dart   | 56 ++++++++++++++++++++++++++---------------------
+ test/ui_test.dart | 52 ++++++++++++++++++++++++++++---------------
+ 3 files changed, 66 insertions(+), 43 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 159ebcdbcd076a88324dae10a7b2cfd4ff325801..a7458a5688c5a8793580e36a18c528b636678314 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,6 @@
+ ## Unreleased — Meta AI Developer Hackathon 2026
+ 
++- The splash car is symmetrical (every row a mirror image, tested), the header is `DMC <version>`, and the status row names this machine (its host name, shortened) instead of a fixed name. No film or carmaker names remain.
+ - Add `dmc disable [--apply] [--json --schema-version 1]`. It removes only dmc's own agent hooks from every config file the installer supports (the workspace's project and local files and the user files), for this dmc build and others, through the exact-match uninstall with byte-exact restore, and stops the watcher. `.dmc/`, every checkpoint and other tools' hooks are untouched. Preview by default; re-enable with `dmc hooks install`.
+ - `dmc doctor` checks agent hooks: a dmc executable that is missing or not executable, a hook pointing at a different dmc build, a Muse Code Interrupt hook that is not async, and an agent checkpoint left open longer than `--stale-hours` (default 2) by a session that looks ended. It suggests the fix and changes nothing.
+ - `dmc hooks status` takes `--json --schema-version 1`. `capabilities` lists `hooks.status` and `disable` (features `hooksStatusJson`, `disable`), additively.
+diff --git a/lib/src/ui.dart b/lib/src/ui.dart
+index 134beecfd41d397675017475f67866de0689cd26..d3418a0742bf4a596fbe504e0ef8bd511451fe4a 100644
+--- a/lib/src/ui.dart
++++ b/lib/src/ui.dart
+@@ -1,4 +1,5 @@
+ import 'dart:async';
++import 'dart:io';
+ 
+ import 'package:dart_console/dart_console.dart';
+ 
+@@ -646,7 +647,7 @@ void _renderSplash(Console console, DmcUiState state) {
+   final compact = width < 110 || height < 36;
+ 
+   // ── Header ──────────────────────────────────────────────────────────
+-  final headerText = 'DMC $dmcVersion (DE LOREAN MOTOR COMPANY)';
++  final headerText = 'DMC $dmcVersion';
+   final headerCol = ((width - headerText.length) ~/ 2).clamp(2, width - 2);
+   _at(console, 1, 2, '─' * (headerCol - 3), fg: ConsoleColor.brightBlack);
+   _at(console, 1, headerCol, headerText, fg: ConsoleColor.yellow);
+@@ -1249,7 +1250,8 @@ void _menu(
+ 
+ void _statusRow(Console console, int row, int width, {required bool compact}) {
+   final vault = compact ? '.dmc' : 'local .dmc vault';
+-  final text = 'SYSTEM: ONLINE | VAULT: $vault | HOUSTON-WS-1';
++  final host = shortHostName(Platform.localHostname);
++  final text = 'SYSTEM: ONLINE | VAULT: $vault | $host';
+   final col = ((width - text.length) ~/ 2).clamp(4, width - 4);
+   _at(console, row, 4, '─' * (col - 6), fg: ConsoleColor.brightBlack);
+   _at(
+@@ -1268,7 +1270,7 @@ void _statusRow(Console console, int row, int width, {required bool compact}) {
+   cursor += 9;
+   _at(console, row, cursor, ' $vault ', fg: ConsoleColor.white);
+   cursor += vault.length + 2;
+-  _at(console, row, cursor, '| HOUSTON-WS-1', fg: ConsoleColor.white);
++  _at(console, row, cursor, '| $host', fg: ConsoleColor.white);
+ }
+ 
+ void _frame(
+@@ -1351,30 +1353,34 @@ void _writeCenteredLine(
+   _at(console, row, col, visible, fg: fg, maxWidth: console.windowWidth - col);
+ }
+ 
+-List<String> buildSplashCarArt() {
+-  const lines = [
+-    r"               /\                                             /\               ",
+-    r"              /  \_________                         _________/  \              ",
+-    r"             /   /         \                       /         \   \             ",
+-    r"            /   /           \                     /           \   \            ",
+-    r"           /___/             \                   /             \___\           ",
+-    r"               \              \_________________/              /               ",
+-    r"                \_____   _______________________________  _____/                ",
+-    r"                      \ [                               ] /                    ",
+-    r"                  ___  \[     D E L O R E A N           ]/  ___                 ",
+-    r"                 /   \  |  ===========================  |  /   \                ",
+-    r"                | [=] | | [■ ■]      | DMC |      [■ ■] | | [=] |                ",
+-    r"                 \___/  |_______|_______________|_______|  \___/                 ",
+-    r"                        (O)                           (O)                        ",
+-    r"                         \=============================/                         ",
+-  ];
+-  final artWidth = lines.fold<int>(
+-    0,
+-    (maxWidth, line) => line.length > maxWidth ? line.length : maxWidth,
+-  );
+-  return lines.map((line) => line.padRight(artWidth)).toList(growable: false);
++/// The machine's name for the status row: the host name up to its first
++/// dot, at most 20 characters, upper case ("Mikes-MacBook-Pro.local" →
++/// "MIKES-MACBOOK-PRO").
++String shortHostName(String hostname) {
++  final short = hostname.split('.').first.trim();
++  final name = short.isEmpty ? 'LOCALHOST' : short.toUpperCase();
++  return name.length > 20 ? name.substring(0, 20) : name;
+ }
+ 
++/// The splash car. Every row is a mirror image of itself (with `/` and
++/// `\`, `[` and `]`, `(` and `)` swapped; the badge text reads normally).
++List<String> buildSplashCarArt() => const [
++  r'    /\                                             /\    ',
++  r'   /  \_________                         _________/  \   ',
++  r'  /   /         \                       /         \   \  ',
++  r' /   /           \                     /           \   \ ',
++  r'/___/             \                   /             \___\',
++  r'    \              \_________________/              /    ',
++  r'     \_____   _____________________________   _____/     ',
++  r'          \ [                               ] /          ',
++  r'      ___  \[                               ]/  ___      ',
++  r'     /   \  |  ===========================  |  /   \     ',
++  r'    | [=] | | [■ ■]      | DMC |      [■ ■] | | [=] |    ',
++  r'     \___/  |_______|_______________|_______|  \___/     ',
++  r'            (O)                           (O)            ',
++  r'             \=============================/             ',
++];
++
+ void _rule(Console console, int row, int width, ConsoleColor color) =>
+     _at(console, row, 0, '─' * width, fg: color, maxWidth: width);
+ 
+diff --git a/test/ui_test.dart b/test/ui_test.dart
+index 9a7298f52405cde618d284cd804b61ee6fb760af..8bef403c2ef7a0628039d86d1d251c5c78bf76c4 100644
+--- a/test/ui_test.dart
++++ b/test/ui_test.dart
+@@ -147,28 +147,44 @@ void main() {
+       expect(computeCenteredColumn(width: 0, text: 'DMC'), 0);
+     });
+ 
+-    test('splash car art matches the traced reference lines', () {
++    test('every splash row is a mirror image of itself', () {
+       final art = buildSplashCarArt();
+       expect(art.map((line) => line.length).toSet(), hasLength(1));
++      const swap = {
++        '/': r'\',
++        r'\': '/',
++        '[': ']',
++        ']': '[',
++        '(': ')',
++        ')': '(',
++      };
++      for (final row in art) {
++        // The badge reads left to right; only the art mirrors.
++        final shape = row.replaceAll(RegExp('[A-Za-z0-9]'), 'A');
++        final mirrored = shape
++            .split('')
++            .reversed
++            .map((char) => swap[char] ?? char)
++            .join();
++        expect(mirrored, shape, reason: row);
++      }
++      expect(art.join('\n'), contains('| DMC |'));
++    });
++
++    test('no film or carmaker names in the splash', () {
++      final art = buildSplashCarArt().join('\n').toUpperCase();
++      for (final banned in ['DELOREAN', 'D E L O R E A N', 'DE LOREAN']) {
++        expect(art, isNot(contains(banned)));
++      }
++    });
++
++    test('the status row names this machine, shortened', () {
++      expect(shortHostName('Mikes-MacBook-Pro.local'), 'MIKES-MACBOOK-PRO');
+       expect(
+-        art.map((line) => line.trimRight()).toList(),
+-        equals([
+-          r"               /\                                             /\",
+-          r"              /  \_________                         _________/  \",
+-          r"             /   /         \                       /         \   \",
+-          r"            /   /           \                     /           \   \",
+-          r"           /___/             \                   /             \___\",
+-          r"               \              \_________________/              /",
+-          r"                \_____   _______________________________  _____/",
+-          r"                      \ [                               ] /",
+-          r"                  ___  \[     D E L O R E A N           ]/  ___",
+-          r"                 /   \  |  ===========================  |  /   \",
+-          r"                | [=] | | [■ ■]      | DMC |      [■ ■] | | [=] |",
+-          r"                 \___/  |_______|_______________|_______|  \___/",
+-          r"                        (O)                           (O)",
+-          r"                         \=============================/",
+-        ]),
++        shortHostName('build-agent-0123456789abcdef.example.com'),
++        'BUILD-AGENT-01234567',
+       );
++      expect(shortHostName(''), 'LOCALHOST');
+     });
+ 
+     test('splash menu supports left and right column navigation', () {

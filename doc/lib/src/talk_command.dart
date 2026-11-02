@@ -276,11 +276,16 @@ class VoiceDeps {
   /// Pacing for `--file` (tests make it instant).
   final Future<void> Function(Duration)? sleep;
 
+  /// Whether `doc talk` handles Ctrl-C itself (restore the terminal, exit
+  /// 130). A full-screen UI that owns the terminal turns this off.
+  final bool watchInterrupts;
+
   const VoiceDeps({
     this.transcriber = const MetaRealtimeTranscriber(),
     TalkTerminal? terminal,
     this.recorder,
     this.sleep,
+    this.watchInterrupts = true,
   }) : terminal = terminal ?? const _DefaultTerminal();
 }
 
@@ -413,6 +418,7 @@ Future<int> runTalkCommand(DocContext context, VoiceDeps deps) async {
       model: route.model,
       onPartial: partial,
       keywords: keywords,
+      watchInterrupts: deps.watchInterrupts,
     );
     // End the partial-transcript line, if anything was recorded.
     if (live && (outcome == null || outcome.recorded)) stdout.writeln();
@@ -524,7 +530,7 @@ Future<int> runTalkCommand(DocContext context, VoiceDeps deps) async {
     var test = await _bisectTest(context);
     if (test == null) {
       out.write('Test command for bisect (Enter to cancel): ');
-      test = context.readLine()?.trim();
+      test = (await context.readLine())?.trim();
       if (test == null || test.isEmpty) {
         out.writeln('Cancelled. Nothing ran.');
         return 0;
@@ -546,7 +552,7 @@ Future<int> runTalkCommand(DocContext context, VoiceDeps deps) async {
     agreed = true;
   } else {
     out.write(question);
-    final answer = (context.readLine() ?? '').trim().toLowerCase();
+    final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
     agreed = answer == 'y' || answer == 'yes';
   }
   if (!agreed) {
@@ -610,6 +616,7 @@ Future<_TurnOutcome?> _recordTurn(
   required String model,
   required void Function(String) onPartial,
   required List<String> keywords,
+  bool watchInterrupts = true,
 }) async {
   final out = context.out;
   StreamSubscription<ProcessSignal>? interrupt;
@@ -617,6 +624,7 @@ Future<_TurnOutcome?> _recordTurn(
   terminal.enterRaw();
   try {
     try {
+      if (!watchInterrupts) throw const SignalException('owned by the UI');
       interrupt = ProcessSignal.sigint.watch().listen((_) {
         terminal.restore();
         stdout.writeln('\nInterrupted. Nothing more was sent.');

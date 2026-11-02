@@ -124,6 +124,27 @@ What to point at:
   the percent-based interface …") and asks before adding it to Muse Code's first prompt. Muse
   Code's TUI then opens with the brief, a blank line and the task. It needs a real terminal.
 
+## On camera, in the TUI (`doc ui`)
+
+The same loop in one full-screen window. Make the terminal **120×36** (the frames in the PR
+were captured at that size; below 80×24 Doc asks for a bigger window). Run `doc ui` (or plain
+`doc`) in `/tmp/doc-demo`. The splash shows the car for about a second; any key skips it.
+
+| # | Step | Keys | What shows |
+|---|---|---|---|
+| 1 | The turns | ↑↓ | Four turns, newest first. The detail pane shows who and when, the plain-English summary (Glimmer; "summarizing…" first), the files with +/− counts and the start of the diff. |
+| 2 | **Find it** | **b**, Enter (test), Enter (setup) | The strip fills in PASS / FAIL per probe, then "Turn 2 broke the tests: In money.py, change apply_discount …", the file, the failing test's name and error line, and Muse Spark's explanation. The turn gets a red ✗. |
+| 3 | Restore? | **n** (for the video: fix it instead) | "Restore to before this turn? It undoes cp_… through dmc. [y/N]" |
+| 4 | **Fix it** | **t**, Enter | `doc timelines … --from-bisect` in the result pane; its one question ("Run 3 Muse Code agents …? [y/N]") is a dialog. Lanes come in the next step. |
+| 5 | **Remember it** | **r** on the bad turn, **y**, then the lesson offer and "What went wrong?" | dmc's preview, one question, the restore, then the lesson draft. The turn shows ↺ undone. |
+| 6 | Approve | **l**, **y** on the draft | The lessons pane; a draft that still says "Not stated" is refused with the exact fix. |
+| 7 | The brief | **a**, Enter (muse-code), the task, Enter (files) | The matched brief, one question, then Muse Code opens with it. When it exits, the TUI comes back. |
+| 8 | **Hey Doc** | **Space**, say "What's the status?", **Space** | The bar shows the live transcript, then "I heard … → I'll run: doc status. Run it? [y/N]"; **y**. |
+
+`d` shows details (full diff, ids, times, model and cost), `o` the raw log of that action, `?`
+every key, and `:` runs any `doc …` command (or a read-only `dmc …` one) into a result pane.
+`q` quits; Ctrl-C also quits and always gives the terminal back.
+
 ### "Hey Doc" variants (push to talk)
 
 Use `doc talk`. Press Space or Enter, speak, then press Space or Enter again. Doc always says what

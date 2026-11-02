@@ -27,6 +27,7 @@ dart compile exe bin/doc.dart -o ../build/doc
 
 | Command | What it does |
 |---|---|
+| `doc ui [--color auto\|always\|never] [--no-splash]` (or `doc`) | The full-screen Doc: turns, summaries, Space to talk, bisect, restore, lessons, start an agent; `:` runs any command. See "The TUI". |
 | `doc models` | Each role's provider and model, and whether its key is set (never the key). |
 | `doc models --check` | Sends one tiny prompt per provider in use and shows latency, tokens and cost. A missing local server or model is said plainly. |
 | `doc models --available` | Lists each provider's model IDs (`GET {baseUrl}/models`). |
@@ -131,6 +132,60 @@ Defaults, overridable in `config.json` under `roles`:
 | `restore` | meta | `muse-spark-1.3` (fallback baseten) | Natural-language restore |
 | `planner`, `judge` | meta | `muse-wonder-1.0` | Parallel timelines (`planner` plans the approaches, `judge` ranks the results) |
 | `voice` | meta | `muse-voice-transcribe-1.0` | "Hey Doc" push-to-talk (`doc talk`), over the realtime WebSocket |
+
+## The TUI (`doc ui`)
+
+`doc ui` (or plain `doc` in an interactive terminal; without one Doc prints the usage) is a
+full-screen front end over the same commands. **Nothing is reimplemented:** every action runs the
+CLI command in-process through `DocContext`, with its output going to a per-action log in Doc's
+data dir (`ui-logs/`) and its questions to the TUI's dialog (`DocContext.readLine` is async for
+this). Panes draw from dmc's JSON and Doc's pure functions.
+
+- **Terminal:** plain ANSI, no dependency (`dart_console` reads keys synchronously, and the TUI
+  needs one async stdin reader). Alternate screen, raw mode (`stdin.lineMode`/`echoMode`), cursor
+  hidden; restored on exit, error, Ctrl-C and SIGTERM. Redraw on SIGWINCH (a size poll on
+  Windows). Below 80×24 it shows one line asking for a bigger window.
+- **Rendering is pure:** `renderTui(state, width, height)` returns the lines (colour as ANSI or
+  plain), and keys are a stream of `KeyEvent`s decoded from raw bytes, so tests check whole
+  frames and script whole flows. Widths follow wcwidth (`■` is one column, as in iTerm2 and
+  Terminal.app by default).
+- **Noise rules:** each pane shows the result in a line or two plus what is needed to act; `d`
+  shows details, `o` the raw log. Questions are one line of context then `[y/N]`. Ids are short
+  (`cp_mvygprjf`); labels are cut to the pane, never with "(truncated by dmc)" (that is under
+  `d`).
+- **Turns** come from `dmc checkpoint list --json`, polled every 3 s while idle. The summary is
+  `doc summarize` (the `summary` role), run when a turn stays selected for 300 ms or on `s`,
+  cached in `summaries/<id>.txt`; the diff is the before → after export diff lesson drafts use.
+- **Bisect** runs `doc bisect --test … [--setup …] --json`; `DocContext.progress` reports each
+  probe (`bisect.probe`), so the strip fills in. The pane keeps the failing test's name and its
+  expected / actual or error lines (`failureEssentials`), never setup output. Then it asks
+  "Restore to before this turn?". The result is saved as `doc bisect` saves it.
+- **Space** runs `doc talk` in-process with a terminal over the TUI's key stream; Doc's own
+  Ctrl-C handling is off (`VoiceDeps.watchInterrupts`) because the TUI owns the terminal.
+- **Agents and the editor** (`a`, `e` in lessons) get the real terminal through
+  `DocContext.handOverTerminal`: the TUI leaves the alternate screen and raw mode, pauses its
+  stdin reader, and comes back when the child exits.
+- **The command bar** (`:`) runs any `doc …` command. `dmc …` is limited to read-only and preview
+  commands (`status`, `doctor`, `capabilities`, `disable` without `--apply`, `hooks status`,
+  `checkpoint list|show|diff|restore|redo` without `--apply`).
+
+| Key | What it does |
+|---|---|
+| **Space** | Talk to Doc, anywhere (Space/Enter stops, Esc cancels): "I heard … → I'll run: doc … Run it? [y/N]" |
+| ↑ ↓ | Select a turn (or a lesson) |
+| `s` | Summarize the selected turn in plain English (also automatic after 300 ms; cached) |
+| `d` | Details: full diff, ids, times, the model / tokens / cost line, setup problems with fixes |
+| `o` | The raw log of the selected action (agent output, setup and test runs never reach the screen) |
+| `r` | Restore the selected turn: dmc's preview, one `[y/N]`, then the lesson offer |
+| `u` | Redo an undone turn: dmc's preview, one `[y/N]` |
+| `/` | Restore by words ("before it touched auth") |
+| `b` | Bisect: test and setup asked once, a strip that fills in, the bad turn, then a restore offer |
+| `l` | Lessons and drafts: Enter shows one, `y` approves, `e` edits (`$VISUAL`/`$EDITOR`), `x` rejects |
+| `a` | Start an agent (muse-code or claude-code) with the matching lessons, like `doc start` |
+| `t` | `doc timelines` in the result pane |
+| `:` | Command bar: any `doc …` command, or a read-only / preview `dmc …` one |
+| `?` | Every key |
+| Esc / `q` | Close or go back / quit (Ctrl-C and SIGTERM also restore the terminal) |
 
 ## Bisect: find the turn that broke the tests
 

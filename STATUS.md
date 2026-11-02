@@ -3,7 +3,7 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-11-02 by Claude (step 1: demo fixes)
+Last updated: 2026-11-03 by Claude (step 2: the TUI)
 
 **Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
 work only. dmc lives in its own repository and is set up in `.deps/dmc` by
@@ -15,6 +15,50 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 ## Done
 
+- **Step 2: the Doc TUI** (branch `tui`). Parts A–G and I are done; H (timelines lanes) is not:
+  `t` runs `doc timelines` in the result pane.
+  - **`doc ui`** (or plain `doc` in a terminal). Plain ANSI, no new dependency: `dart_console`
+    reads keys synchronously, and the TUI needs one async stdin subscription.
+    - Alternate screen, raw mode and a hidden cursor, restored on exit, error, Ctrl-C and
+      SIGTERM. Redraw on SIGWINCH. One line below 80×24.
+    - Rendering is pure (`renderTui(state, width, height)`), and keys are a stream.
+  - **Panes:** turns newest first with ● ✗ ↺ ○ and a detail pane (cached `doc summarize`, files
+    with +/−, a short coloured diff). `d` shows details, `o` the per-action log in
+    `ui-logs/`. Questions are one shape: context, then `[y/N]`.
+  - **Keys:** Space (talk), `r`/`/`/`u` (restore, by words, redo), `b` (bisect strip, bad turn,
+    expected/actual lines, explanation, restore offer), `l` (lessons: approve, edit, reject),
+    `a` (start an agent: brief, question, hand-over, back), `t`, `:` (any doc command; dmc
+    read-only/preview), `?`.
+  - **Same code paths:** commands run in-process. `DocContext.readLine` is async; new hooks are
+    `progress` (bisect probes), `handOverTerminal` (agent, editor),
+    `VoiceDeps.watchInterrupts`, `doctorChecks()` and `lessonStoreFor()`. A coverage test
+    checks every CLI command is reachable. Bisect suggests `flutter pub get` for Flutter
+    projects.
+  - **dmc patch 0036:** a symmetrical splash car (a mirror test), `DMC <version>`, the real host
+    name; no film or carmaker names. A clean `setup_dmc` applies 36/36.
+  - **Real runs on the Mac**, in a 120×36 pty with the RUNBOOK turns in `/tmp/doc-tui`:
+    - splash, summaries (Glimmer), details;
+    - bisect (strip PASS/FAIL/not needed, "Turn 2 broke the tests", the two errors, Muse
+      Spark's explanation);
+    - restore (dmc preview, y), lesson offer, "What went wrong?", ↺ undone, approve in `l`;
+    - Space with a fake `rec` playing `say` speech ("What's the status?" → "I'll run: doc
+      status. Run it? [y/N]");
+    - the command bar, `?`;
+    - `a` with a stand-in agent: it got the brief and the task in a cooked terminal, and the
+      TUI came back.
+    - Every run exited 0 with the terminal back to `icanon echo`.
+  - **Bugs found and fixed in those runs:**
+    - a stream close that never finished after a voice turn;
+    - keys swallowed after a voice turn;
+    - recording progress in the voice question;
+    - the status note showing the wrong line;
+    - full ids in summaries and previews;
+    - the pane showing beside dialogs;
+    - the shared chat client printing "Waking Muse Glimmer…" over the screen;
+    - an empty bisect test cancelling silently;
+    - long briefs cut in dialogs.
+  - **Gates:** a clean `setup_dmc` (36/36); dmc analyzer clean, 236 tests, 3 contract tests;
+    Doc analyzer clean, 238 tests.
 - **Step 1: demo fixes** (branch `demo-fixes`), from Mike's run on a real Flutter project
   (`Explain_This_Bill_2`, 2026-11-01). dmc is unchanged.
   - **Timelines agents without a shell.** The Nov 1 logs (`tl-20261101-190536-f068`, `…-190152-ce9c`)
@@ -759,6 +803,20 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 - **The Fireworks key was exposed once.** Before line 49 of `~/.zshrc` was fixed, a new zsh
   printed it in an error message, and that appeared in one tool output in this session. Mike
   should rotate the Fireworks key.
+- **TUI (2026-11-03):**
+  - **Not done:** timelines lanes (part H); `t` shows the CLI output in the result pane.
+  - **Not tested on a real Windows terminal**, which polls the size instead of SIGWINCH. The
+    Windows tests run in CI.
+  - **Hand-over:** stdin is paused, not closed, while an agent or editor has the terminal. It
+    worked with a stand-in agent; not yet tried with Muse Code's or Claude Code's own TUI.
+  - **The live microphone inside the TUI** is not tried (only a fake `rec`). `doc talk` at the
+    microphone was verified by Mike on 2026-11-02.
+  - **Summaries** are the summary role's words: Glimmer's sometimes say "six exclusions" and
+    similar dmc facts. Ids are shortened on screen.
+  - **Keys and dialogs:**
+    - Keys pressed while a command is finishing are dropped, with a "Doc is busy" note.
+    - Arrow keys pressed while waiting to talk count as Esc (as in `doc talk`).
+  - **Polling:** the turns list polls dmc every 3 s while idle.
 - One unexplained Doc test failure: during the final gates on the Mac, one
   `dart test --concurrency=1` run in `doc/` reported a failure (the output was cut to its last
   line, so the failing test is unknown). It did not reproduce in 15 later runs, including the same
@@ -774,9 +832,11 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
-1. Record the video from demo/RUNBOOK.md (Mike), with a live `doc talk` at the microphone.
-2. Add the video's link to README.md's "▶ 3-minute demo" line (it says `<video link>` now).
-3. Submit by Nov 4, 9:00 PM ET.
+1. Mike tries `doc ui` by hand (see the PR): Space at the real microphone, `a` with the real Muse
+   Code, `e` with his editor. Then decide on timelines lanes (part H) if there is time.
+2. Record the video from demo/RUNBOOK.md (Mike); the TUI version is in "On camera, in the TUI".
+3. Add the video's link to README.md's "▶ 3-minute demo" line (it says `<video link>` now).
+4. Submit by Nov 4, 9:00 PM ET.
 
 - Mike: once happy with this repository, make `EvilMetaMonkey/dmc-meta-hackathon` private (or
   archive it with a README pointing here). Name dmc and its setup (`tool/setup_dmc.dart`) in the
@@ -792,6 +852,11 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
 
+- 2026-11-03 · Claude · Step 2, the TUI (branch `tui`): `doc ui` parts A–G (shell, turns and
+  details, Space to talk, restore/redo, bisect pane, lessons and start agent, splash/help/empty
+  states) and dmc patch 0036 (splash cleanup). Real pty runs of the whole loop on the Mac fixed
+  nine bugs. Left: timelines lanes (H). Gates: a clean setup_dmc 36/36; dmc analyzer clean, 236 tests, 3
+  contract tests; Doc analyzer clean, 238 tests.
 - 2026-11-02 · Claude · Step 1 demo fixes (branch `demo-fixes`): timelines without a shell, stall
   detection and step counts from events; bisect-aware planning and lessons on base/plan files;
   restore picks by list number with a file cross-check; `doc start` asks on no match; approve,

@@ -15,7 +15,7 @@ baseline), pinned by SHA.
 **Verified on 2026-10-31:**
 
 - The series applies cleanly with `git am` to a fresh clone of EvilMetaMonkey/dmc at that commit
-  (re-checked on 2026-10-31 with 35 patches: a clean `tool/setup_dmc.dart` applied 35 of 35).
+  (re-checked on 2026-10-31 with 36 patches: a clean `tool/setup_dmc.dart` applied 36 of 36).
 - The resulting dmc tree is identical, blob for blob, to the dmc files of the event repository
   it came from (`EvilMetaMonkey/dmc-meta-hackathon` `main` at `0f58a36`).
 - `tool/export_patches.dart` reproduces the series byte for byte.
@@ -67,6 +67,7 @@ repository with their real history.
 | 0033 | dmc doctor checks agent hooks | `lib/dmc.dart`, `lib/src/cli.dart`, `lib/src/doctor.dart`, `lib/src/hook_doctor.dart`, `test/hook_doctor_test.dart` | Parity: doctor reports a missing or non-executable dmc in a hook, a hook pointing at a different dmc build, a non-async Muse Interrupt hook, and an agent checkpoint left open past `--stale-hours` (default 2) by an ended session, each with its fix; it changes nothing |
 | 0034 | Document dmc disable, the doctor hook checks and hooks status --json | `AGENTS.md`, `CHANGELOG.md` | Docs for 0032–0033 |
 | 0035 | doctor: skip the execute-bit check on Windows by default | `lib/src/hook_doctor.dart` | Fix for 0033 on Windows (no execute bit), found by CI |
+| 0036 | Splash: a symmetrical car, DMC <version>, the real host name | `lib/src/ui.dart`, `test/ui_test.dart`, `CHANGELOG.md` | The splash car is a mirror image (tested), the header is `DMC <version>`, the status row shows the host name; no film or carmaker names |
 
 ## Step 1: every path changed since the `pre-hackathon` tag
 

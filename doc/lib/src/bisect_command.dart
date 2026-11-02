@@ -132,12 +132,23 @@ class _BisectAbort implements Exception {
   const _BisectAbort(this.message);
 }
 
+/// Whether a pubspec depends on the Flutter SDK (an indented `flutter:`
+/// key, as under `dependencies:`; the top-level `flutter:` section alone
+/// does not count).
+bool isFlutterPubspec(String pubspec) => RegExp(
+  r'^\s+flutter:\s*\n\s+sdk:\s*flutter\b',
+  multiLine: true,
+).hasMatch(pubspec.replaceAll('\r\n', '\n'));
+
 /// A setup command Doc can suggest for the files it recognises in the
 /// workspace root, or null. Suggestions are never run without `--setup`, a
 /// yes, or `--yes`.
 String? suggestSetup(String root) {
   bool has(String name) => File(p.join(root, name)).existsSync();
-  if (has('pubspec.yaml')) return 'dart pub get';
+  if (has('pubspec.yaml')) {
+    final pubspec = File(p.join(root, 'pubspec.yaml')).readAsStringSync();
+    return isFlutterPubspec(pubspec) ? 'flutter pub get' : 'dart pub get';
+  }
   if (has('package.json')) {
     return has('package-lock.json') ? 'npm ci' : 'npm install';
   }
@@ -275,7 +286,7 @@ Future<int> runBisectCommand(DocContext context) async {
         setup = suggested;
       } else {
         context.out.write('Run this setup in each probe? [y/N] ');
-        final answer = (context.readLine() ?? '').trim().toLowerCase();
+        final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
         if (answer == 'y' || answer == 'yes') setup = suggested;
       }
     }
@@ -341,6 +352,16 @@ Future<int> runBisectCommand(DocContext context) async {
         keep: keep,
       );
       records.add(record);
+      context.progress?.call({
+        'type': 'bisect.probe',
+        'index': index,
+        'checkpoint': point.checkpoint.id,
+        'state': point.state,
+        'passed': record.passed,
+        'timedOut': record.timedOut,
+        'setupFailed': record.setupFailed,
+        'seconds': record.elapsed.inMilliseconds / 1000,
+      });
       say(
         '[probe $count] ${point.description}  ${record.passed
             ? 'PASS'
@@ -547,7 +568,7 @@ Future<int> runBisectCommand(DocContext context) async {
     say('Restore to before this turn? [y/N] yes (--yes)');
   } else {
     context.out.write('Restore to before this turn? [y/N] ');
-    final answer = (context.readLine() ?? '').trim().toLowerCase();
+    final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
     if (answer != 'y' && answer != 'yes') {
       say('Not restored. You can run: doc restore ${bad.id}');
       return 0;
