@@ -89,7 +89,17 @@ void main() {
     expect(text, contains('Doc doctor (no model calls; add --check'));
     expect(text, contains('  ok    dmc: $dmc (dmc '));
     expect(text, contains('  warn  No dmc workspace at ${workspace.path}'));
-    expect(text, contains('        Fix: dmc init'));
+    // Fix lines name the dmc Doc found, quoted; never a bare `dmc`
+    // (macOS ships /usr/bin/dmc).
+    expect(text, contains('        Fix: "$dmc" init'));
+    expect(
+      text,
+      contains(
+        '        Fix: "$dmc" init, then "$dmc" hooks install --agent claude-code --apply',
+      ),
+    );
+    expect(RegExp(r'Fix: dmc ').hasMatch(text), isFalse);
+    expect(RegExp(r', then dmc ').hasMatch(text), isFalse);
     expect(
       text,
       contains(
@@ -269,7 +279,7 @@ void main() {
     expect(
       '$out',
       contains(
-        'Fix: dmc disable --apply, then dmc hooks install --agent claude-code --apply',
+        'Fix: "$dmc" disable --apply, then "$dmc" hooks install --agent claude-code --apply',
       ),
     );
   });

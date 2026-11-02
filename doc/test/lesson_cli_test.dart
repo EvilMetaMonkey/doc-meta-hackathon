@@ -210,7 +210,12 @@ void main() {
     final path = RegExp(r'Draft saved: (.*\.md)').firstMatch(text)![1]!;
     final id = RegExp(r'([^/\\]+)\.md$').firstMatch(path)![1]!;
     expect(await doc(['lesson', 'approve', id]), 1);
-    expect('$err', contains('still says the reason is not stated'));
+    expect(
+      '$err',
+      contains(
+        "Not approved. This draft has no reason for the undo. Add one with: doc lesson edit $id (replace the 'Not stated' line), or redraft with: doc lesson draft $checkpointId --note '…'",
+      ),
+    );
 
     // With a note, the note is the reason and nothing is replaced.
     out.clear();
@@ -266,7 +271,7 @@ void main() {
         file.readAsStringSync().replaceFirst('  - "app.py"\n', ''),
       );
       expect(await doc(['lesson', 'approve', path]), 1);
-      expect('$err', contains('files is empty'));
+      expect('$err', contains('It covers no files, so it could never match.'));
     },
   );
 
@@ -334,61 +339,80 @@ void main() {
     },
   );
 
-  test(
-    'start passes the right first prompt for yes, no and no match',
-    () async {
-      if (Platform.isWindows) return; // The fake agent is a shell script.
-      final baseten = await FakeProvider.start([FakeReply.chat(draftReply)]);
-      final modal = await FakeProvider.start([
-        FakeReply.chat('Before you start: keep the parameter name.'),
-      ]);
-      addTearDown(baseten.close);
-      addTearDown(modal.close);
-      writeConfig({
-        'baseten': baseten.baseUrl,
-        'modal': modal.baseUrl,
-      }, roles: summaryOnModal);
-      await draftAndApprove(baseten);
+  test('start passes the right first prompt for yes, no and no match', () async {
+    if (Platform.isWindows) return; // The fake agent is a shell script.
+    final baseten = await FakeProvider.start([FakeReply.chat(draftReply)]);
+    final modal = await FakeProvider.start([
+      FakeReply.chat('Before you start: keep the parameter name.'),
+    ]);
+    addTearDown(baseten.close);
+    addTearDown(modal.close);
+    writeConfig({
+      'baseten': baseten.baseUrl,
+      'modal': modal.baseUrl,
+    }, roles: summaryOnModal);
+    await draftAndApprove(baseten);
 
-      final record = File(p.join(home.path, 'agent-argv.txt'));
-      final fakeAgent = File(
-        p.join(home.path, 'fake-muse'),
-      )..writeAsStringSync('#!/bin/sh\nprintf "%s" "\$1" > "${record.path}"\n');
-      Process.runSync('chmod', ['755', fakeAgent.path]);
-      final env = {'DOC_MUSE_BIN': fakeAgent.path};
-      const task = 'Add a farewell function to app.py';
+    final record = File(p.join(home.path, 'agent-argv.txt'));
+    final fakeAgent = File(p.join(home.path, 'fake-muse'))
+      ..writeAsStringSync('#!/bin/sh\nprintf "%s" "\$1" > "${record.path}"\n');
+    Process.runSync('chmod', ['755', fakeAgent.path]);
+    final env = {'DOC_MUSE_BIN': fakeAgent.path};
+    const task = 'Add a farewell function to app.py';
 
-      expect(
-        await doc(['start', 'muse-code', task, '--yes'], env: env),
-        0,
-        reason: '$err',
-      );
-      expect(
-        record.readAsStringSync(),
-        'Before you start: keep the parameter name.\n\n$task',
-      );
+    expect(
+      await doc(['start', 'muse-code', task, '--yes'], env: env),
+      0,
+      reason: '$err',
+    );
+    expect(
+      record.readAsStringSync(),
+      'Before you start: keep the parameter name.\n\n$task',
+    );
 
-      answers.add('n');
-      expect(await doc(['start', 'muse-code', task], env: env), 0);
-      expect('$out', contains("Add this to the agent's first prompt? [y/N]"));
-      expect(record.readAsStringSync(), task);
+    answers.add('n');
+    expect(await doc(['start', 'muse-code', task], env: env), 0);
+    expect('$out', contains("Add this to the agent's first prompt? [y/N]"));
+    expect(record.readAsStringSync(), task);
 
-      answers.add('y');
-      expect(await doc(['start', 'muse-code', task], env: env), 0);
-      expect(record.readAsStringSync(), startsWith('Before you start:'));
+    answers.add('y');
+    expect(await doc(['start', 'muse-code', task], env: env), 0);
+    expect(record.readAsStringSync(), startsWith('Before you start:'));
 
-      out.clear();
-      expect(
-        await doc([
-          'start',
-          'muse-code',
-          'Update the README',
-          '--yes',
-        ], env: env),
-        0,
-      );
-      expect('$out', contains('No lessons match this task'));
-      expect(record.readAsStringSync(), 'Update the README');
-    },
-  );
+    out.clear();
+    expect(
+      await doc(['start', 'muse-code', 'Update the README', '--yes'], env: env),
+      0,
+    );
+    expect(
+      '$out',
+      contains(
+        'No lesson matched any file (the task names no known file; add --files <path> to check one). Start muse-code with the task alone? [y/N] yes (--yes)',
+      ),
+    );
+    expect(record.readAsStringSync(), 'Update the README');
+
+    // Without --yes, "no lesson" is a question; no answer starts nothing.
+    record.deleteSync();
+    out.clear();
+    answers.add('');
+    expect(
+      await doc([
+        'start',
+        'muse-code',
+        'Update the README',
+        '--files',
+        'README.md',
+      ], env: env),
+      0,
+    );
+    expect(
+      '$out',
+      contains(
+        'No lesson matched README.md. Start muse-code with the task alone? [y/N] ',
+      ),
+    );
+    expect('$out', contains('Nothing was started.'));
+    expect(record.existsSync(), isFalse);
+  });
 }

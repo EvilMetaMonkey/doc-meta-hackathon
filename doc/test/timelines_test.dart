@@ -589,6 +589,135 @@ void main() {
     });
   });
 
+  group('Muse Code progress (event shapes from the 2026-11-01 logs)', () {
+    // One real line, trimmed of ids: a proposed shell command.
+    const bashProposed =
+        '{"schema_version": 1, "sequence": 312, "record_type": "event", "payload_type": "task.lifecycle.proposed", "payload_schema_version": 1, "payload": {"kind": "task_lifecycle", "task_id": "t9", "event": {"kind": "proposed", "task_id": "t9", "task_kind": "tool.bash"}}}';
+    String task(String lifecycle, String kind) => jsonEncode({
+      'payload_type': 'task.lifecycle.$lifecycle',
+      'payload': {
+        'kind': 'task_lifecycle',
+        'event': {'kind': lifecycle, 'task_kind': kind},
+      },
+    });
+    List<String> step() => [
+      task('proposed', 'model.meta.response'),
+      task('accepted', 'model.meta.response'),
+      task('completed', 'model.meta.response'),
+    ];
+
+    test('steps are counted from model.meta.response proposals', () {
+      final progress = MuseProgress();
+      for (final line in [...step(), ...step(), 'not json', ...step()]) {
+        progress.add(line);
+      }
+      expect(progress.steps, 3);
+      expect(progress.awaitingApproval, isNull);
+    });
+
+    test('a proposed tool with nothing after it is awaiting approval', () {
+      final progress = MuseProgress();
+      for (final line in [...step(), bashProposed]) {
+        progress.add(line);
+      }
+      expect(progress.awaitingApproval, 'tool.bash');
+      progress.add(task('accepted', 'tool.bash'));
+      expect(progress.awaitingApproval, isNull);
+    });
+
+    test('a run killed before run.usage reports the steps it took', () {
+      final outcome = parseMuseEvents([...step(), ...step(), bashProposed]);
+      expect(outcome.steps, 2);
+      expect(outcome.terminal, isNull);
+      // run.usage wins when it arrives.
+      expect(
+        parseMuseEvents([
+          ...step(),
+          jsonEncode({
+            'payload_type': 'run.usage',
+            'payload': {'calls': 5, 'models': []},
+          }),
+        ]).steps,
+        5,
+      );
+    });
+
+    test('the stall reason says what the agent was waiting for', () {
+      const stall = Duration(seconds: 90);
+      expect(
+        timelineStallReason('tool.bash', stall),
+        'waiting for approval to run a shell command (Doc runs agents without a shell)',
+      );
+      expect(
+        timelineStallReason('tool.edit_file', stall),
+        'waiting for approval to use edit_file (nobody can approve it here)',
+      );
+      expect(timelineStallReason(null, stall), 'no progress for 90 s');
+    });
+
+    test('a stalled timeline round-trips and shows as stalled', () {
+      final run = sampleRun();
+      run.timelines.first
+        ..status = TimelineStatus.stalled
+        ..reason = 'no progress for 90 s';
+      final back = TimelineRun.fromJson(
+        jsonDecode(jsonEncode(run.toJson())) as Map,
+      );
+      expect(back.timelines.first.status, TimelineStatus.stalled);
+      expect(
+        timelineComparison(back).join('\n'),
+        contains(
+          'agent: stalled, 5 step(s), 1:12, \$0.0031 (no progress for 90 s)',
+        ),
+      );
+    });
+  });
+
+  test('the planner hears about bisect, the shell and the smallest change', () {
+    final message = timelinePlannerMessage(
+      task: 'fix it',
+      n: 3,
+      brief: null,
+      baseDescription: 'after state of checkpoint cp_x (claude-code)',
+      baseLabel: 'Raise the tolerance',
+      baseChanged: const ['lib/critic.dart (modified)'],
+      files: const ['lib/critic.dart'],
+      test: 'flutter test',
+      bisect: const TimelineBisectFacts(
+        label: 'Raise the tolerance',
+        changedFiles: ['lib/critic.dart (modified)'],
+        diff:
+            '--- lib/critic.dart (modified)\n-  toleranceCents = 1;\n+  toleranceCents = 200;',
+        explanation: 'The tolerance hides real mismatches.',
+      ),
+    );
+    expect(message, contains("That turn's prompt: Raise the tolerance"));
+    expect(message, contains('+  toleranceCents = 200;'));
+    expect(
+      message,
+      contains("Bisect's explanation: The tolerance hides real mismatches."),
+    );
+    expect(timelinePlannerSystemPrompt, contains('they have no shell'));
+    expect(
+      timelineAgentTestLine('flutter test'),
+      'Work only in this folder. You cannot run commands. Doc runs the tests here after you finish with: flutter test',
+    );
+    // Without bisect facts, no bisect lines.
+    expect(
+      timelinePlannerMessage(
+        task: 'fix it',
+        n: 3,
+        brief: null,
+        baseDescription: 'b',
+        baseLabel: null,
+        baseChanged: const [],
+        files: const [],
+        test: 't',
+      ),
+      isNot(contains('Bisect')),
+    );
+  });
+
   test('the last bisect is stored under a name valid on every platform', () {
     final file = lastBisectFile(const {
       'DOC_DATA_DIR': '/data',

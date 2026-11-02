@@ -173,11 +173,13 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
     completionTokens += call.result.completionTokens;
     redactions = call.redactionCount;
     try {
-      plan = planNaturalRestore(
-        parseNlRestoreAnswer(call.result.content),
+      final answer = parseNlRestoreAnswer(call.result.content);
+      plan = crossCheckRestorePlan(
+        planNaturalRestore(answer, candidates),
+        request,
         candidates,
       );
-      report['answer'] = parseNlRestoreAnswer(call.result.content).toJson();
+      report['answer'] = answer.toJson(candidates);
     } on NlRestoreRefused catch (error) {
       problem = error.message;
       if (attempt == 1) {
@@ -189,7 +191,7 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
           ChatMessage('assistant', call.result.content),
           ChatMessage(
             'user',
-            'That answer was not usable: $problem Answer again with only the JSON object, using an id from the list.',
+            'That answer was not usable: $problem Answer again with only the JSON object, using numbers from the list.',
           ),
         ];
       }
@@ -219,7 +221,9 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
   say(
     'Doc\'s reading ($footer; confidence ${plan.confidence.toStringAsFixed(2)}):',
   );
+  say('  ${nlTurnSummary(plan.target, candidates)}');
   say('  ${_modeText(plan.mode, plan.target)}: ${plan.reason}');
+  if (plan.crossCheck != null) say('  Check: ${plan.crossCheck}');
 
   // 3. Low confidence or alternatives: the user picks. Never --yes.
   if (plan.needsChoice) {

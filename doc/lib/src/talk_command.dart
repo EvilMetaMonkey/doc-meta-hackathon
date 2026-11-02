@@ -53,8 +53,22 @@ int _readStdinByte() => stdin.readByteSync();
 /// can still use `stdin.readLineSync`. A pending read is always drained
 /// before Doc moves on, so no keystroke is lost.
 class StdinTalkTerminal implements TalkTerminal {
+  /// Reads one byte in the helper isolate. Must be top-level or static and
+  /// capture nothing (tests pass one that fails).
+  final int Function() _readByte;
+
+  /// Where a read error is reported, once. Defaults to stderr.
+  final void Function(String line) _log;
+
+  StdinTalkTerminal({
+    int Function() readByte = _readStdinByte,
+    void Function(String line)? log,
+  }) : _readByte = readByte,
+       _log = log ?? stderr.writeln;
+
   bool? _echo;
   bool? _line;
+  bool _readErrorLogged = false;
 
   @override
   bool get hasTerminal => stdin.hasTerminal;
@@ -87,10 +101,15 @@ class StdinTalkTerminal implements TalkTerminal {
   Future<TalkKey> readKey() async {
     final int byte;
     try {
-      byte = await Isolate.run(_readStdinByte);
-    } on Object {
+      byte = await Isolate.run(_readByte);
+    } on Object catch (error) {
       // stdin is unreadable (the terminal went away): treat it as Esc, so
       // a read pending during a recording never becomes an uncaught error.
+      // Said once, so a regression is visible.
+      if (!_readErrorLogged) {
+        _readErrorLogged = true;
+        _log('[doc] could not read the key: $error');
+      }
       return TalkKey.cancel;
     }
     return byte < 0 ? TalkKey.cancel : talkKeyFor(byte);

@@ -440,15 +440,16 @@ Future<int> runBisectCommand(DocContext context) async {
     'lastGood': lastGoodPoint.toJson(),
     'failingOutputTail': failing,
   };
-  // For doc timelines --from-bisect.
-  saveLastBisect(context.env, fingerprint, {
+  // For doc timelines --from-bisect (saved again with the explanation).
+  final saved = <String, Object?>{
     'savedAt': DateTime.now().toUtc().toIso8601String(),
     'workspace': root,
     'test': test,
     'setup': setup,
     'links': links,
     ...result,
-  });
+  };
+  saveLastBisect(context.env, fingerprint, saved);
   if (!json) {
     say('');
     say('First bad turn: ${bad.id}');
@@ -514,6 +515,10 @@ Future<int> runBisectCommand(DocContext context) async {
           maxTokens: 2000,
         );
         explanation = call.result.content;
+        saveLastBisect(context.env, fingerprint, {
+          ...saved,
+          'explanation': explanation,
+        });
         if (!json) {
           say('');
           say(

@@ -32,7 +32,7 @@ dart compile exe bin/doc.dart -o ../build/doc
 | `doc models --available` | Lists each provider's model IDs (`GET {baseUrl}/models`). |
 | `doc summarize <checkpoint-id>` | Reads `checkpoint show` and `checkpoint diff` JSON from dmc, redacts, and asks the `summary` role for a 2–3 sentence plain-English summary: what changed, which files, anything risky. |
 | `doc usage` | Tokens, audio seconds and estimated cost per provider against the budgets (Modal: calls and tokens; billed by GPU time). |
-| `doc timelines "<task>" --test "<command>" [--from <cp> --state before\|after] [--n 3] [--setup …] [--link <dir>]… [--max-steps <n>] [--timeout <min>] [--yes] [--json]` | Parallel timelines: Muse Wonder plans N approaches, N Muse Code agents try them in separate worktrees, Doc tests and compares them. See "Parallel timelines". |
+| `doc timelines "<task>" --test "<command>" [--from <cp> --state before\|after] [--n 3] [--setup …] [--link <dir>]… [--max-steps <n>] [--timeout <min>] [--stall <s>] [--agent-model <id>] [--yes] [--json]` | Parallel timelines: Muse Wonder plans N approaches, N Muse Code agents try them in separate worktrees, Doc tests and compares them. See "Parallel timelines". |
 | `doc timelines list \| show <run-id> \| judge <run-id> \| pick <run-id> <k> \| clean <run-id>` | Past runs; (re)judge a run with Wonder; the picked timeline's diff, its patch and the git commands to bring it in (Doc runs none); remove worktree folders (never branches). |
 | `doc doctor [--check]` | Is everything set up? Prints an ok/warn/FAIL list, each problem with its fix. See "Doctor". |
 | `doc status` | The latest checkpoints (time, agent, status, changed files, undone or not), from `dmc checkpoint list` JSON. |
@@ -238,9 +238,22 @@ diffs, and the user picks one. The other two are archived, never deleted. No aut
      turn's **after**-state, where the tests fail: its before-state already passes, so there
      would be nothing to fix there. Doc says so. `--test` defaults to the command bisect used.
 2. **Plan.** The `planner` role (Muse Wonder `muse-wonder-1.0` on Meta) gets the task, the
-   matched lesson brief (the existing file-overlap matching; no match means no brief call), the
-   base checkpoint's label and changed files, and the base's file names (never contents). The
-   whole prompt is redacted. Wonder answers with `response_format` JSON (verified to accept a
+   matched lesson brief, the base checkpoint's label and changed files, and the base's file
+   names. The whole prompt is redacted.
+   - **Lessons** match by file overlap (no match means no brief call) on the task's paths,
+     `--files` and, with `--from` or `--from-bisect`, the base turn's changed files. After
+     planning, the files in Wonder's plan are matched too; if that adds lessons, the brief is
+     rebuilt for the agents and the judge. Doc prints which lessons matched ("Lessons matched on
+     …: <id> (<files>)." or "No lesson matched <files>."), and the run saves their ids.
+   - **With `--from-bisect`** the planner also gets the bad turn's prompt, its changed files, its
+     diff (before → after, the same `abandonedDiff` the lesson draft uses: same limits, and
+     secret-bearing files named only) and bisect's explanation, which `doc bisect` saves. No other
+     file contents are sent.
+   - The planner is told that the agents cannot run commands (so no plan may tell them to), to
+     prefer the smallest change that makes the tests pass, that after a bisect one approach may
+     revert or partly revert the bad turn, and that no approach may go against a lesson.
+
+    Wonder answers with `response_format` JSON (verified to accept a
    strict schema on 2026-10-28): `{approaches: [{title, plan, files_likely}]}`, with the schema
    requiring exactly N. `parseTimelineApproaches` (pure) checks exactly N, a title and a plan of
    at most 120 words each, distinct titles, and "clearly different" plans (word overlap at most
@@ -273,10 +286,19 @@ diffs, and the user picks one. The other two are archived, never deleted. No aut
    - Doc checks `dmc hooks status --agent muse-code` and says so when the user-scope hooks are
      missing (then there are no per-turn checkpoints).
 5. **Run N agents in parallel, headless:** `muse exec "<prompt>" --max-model-steps <S>
-   --disable-web-tools --json`, in each worktree.
-   - The prompt is the lesson brief (if any), the approach's title and plan, the task, and the
-     test command Doc will run.
+   --disable-web-tools --disable-shell --json`, in each worktree.
+   - **No shell.** A shell command that needs approval would wait forever, since nobody can
+     approve it (found on a real Flutter project on 2026-11-01: two of three agents sat for the
+     whole timeout). Doc runs the tests itself.
+   - The prompt is the lesson brief (if any), the approach's title and plan, the task, and
+     "Work only in this folder. You cannot run commands. Doc runs the tests here after you finish
+     with: <test>".
    - `--timeout` (minutes, default 10) kills an agent.
+   - **`--stall <seconds>`** (default 90): an agent with no new event for that long is stopped as
+     `stalled`. If its last event proposed a tool, the reason says so, for example "waiting for
+     approval to run a shell command (Doc runs agents without a shell)"; otherwise "no progress
+     for 90 s".
+   - A stopped or timed-out agent reports the steps it took, counted from its events (see below).
    - One status line per timeline as it starts and ends, and a "running:" line every 30 s.
    - Ctrl-C stops every agent cleanly; the worktrees and branches are kept and the run is saved
      as `interrupted`.
@@ -286,12 +308,13 @@ diffs, and the user picks one. The other two are archived, never deleted. No aut
    timeout counts as a failure; `--link` folders are symlinked for the tests only and removed
    before anything else is committed).
 7. **Compare.** One block per timeline: approach, agent status (done, step limit, failed, timed
-   out, stopped), steps, time and cost, files changed with +/− lines, tests with a failing tail,
+   out, stalled, stopped), steps, time and cost, files changed with +/− lines, tests with a failing tail,
    and the branch. The run (plans, base, results, branches) is saved as
    `<data dir>/timelines/<run-id>/run.json`, with each agent's `--json` events and stderr next
    to it; `--json` prints the run.
 8. **Wonder judges (advice only).** Unless `--no-judge`, the `judge` role (Muse Wonder) gets the
-   task, the base checkpoint's label and, per timeline:
+   task, the base checkpoint's label, the lesson brief (it says when a timeline goes against a
+   lesson) and, per timeline:
    - the approach title and plan;
    - the diff against the base (read-only `git diff`, cut at 6,000 characters);
    - the test result with the failing tail;
@@ -345,7 +368,9 @@ diffs, and the user picks one. The other two are archived, never deleted. No aut
   judge, sandbox on, untrusted workspace), `muse exec` edits files and runs sandboxed shell
   commands with nobody to approve: it changed a file and ran `python3 -c …` in a probe. So Doc
   needs neither `--disable-approval` nor `--trust-workspace`, and never uses `--yolo`.
-  `--disable-web-tools` keeps agents off the web.
+  `--disable-web-tools` keeps agents off the web. **But some shell commands do need approval**
+  (2026-11-01, `flutter` commands in an untrusted workspace): the proposal is the last event and
+  the agent waits forever. Since then Doc passes `--disable-shell`.
 - **`--max-model-steps N`:** a run that hits it exits 1 with `run.terminal.failed` and the reason
   "model did not reach a terminal state within N step(s)"; edits made so far are kept. Doc
   reports it as "step limit".
@@ -353,6 +378,12 @@ diffs, and the user picks one. The other two are archived, never deleted. No aut
   `calls` (model steps) and `models[{model, input_tokens, cached_tokens, output_tokens}]`, and
   `run.terminal.completed` / `run.terminal.failed` carry `terminal`, `text` and `reason`. Doc
   reads steps, tokens and cost from them.
+- **Steps and tools as they happen** (verified 2026-11-01): each model call starts as a
+  `task.lifecycle.proposed` task with `task_kind: "model.meta.response"` (their count equals
+  `run.usage.calls` in every completed run checked), and each tool as one with `task_kind`
+  `tool.bash`, `tool.edit_file`, …, then `accepted`, `started`, `completed`. A run killed before
+  `run.usage` gets its step count from these; a tool proposal with nothing after it means the
+  agent is waiting for approval.
 - **Hooks:** the user-scope dmc hooks fire in the worktrees, outside the repository: each real
   timeline got one agent-turn checkpoint in its own vault, and the main vault was unchanged.
 
@@ -371,7 +402,7 @@ both agents' hooks:
 $ doc timelines "fix the bug the tests catch without changing the tests" --from cp_mvsxg91k_… --state after --test "python3 -m unittest -q" --max-steps 10
 Base: after state of checkpoint cp_mvsxg91k_… (muse-code): In money.py, change round_money to round to 1 decimal place instead of 2, so displayed prices are s…
   4 file(s), exported by dmc to ~/.local/share/dmc-doc/timelines/tl-20261028-213604-3f19/base
-No lessons match this task.
+No lessons match this task.            # (since 2026-11-02: "No lesson matched money.py.")
 
 Plan (meta muse-wonder-1.0; 334 in / 745 out; $0.0162; 0 item(s) redacted):
   1. Restore two-decimal round() call
@@ -416,7 +447,8 @@ checks:
   `hooks status --json`; and whether the current folder is a dmc workspace.
 - **Agent hooks**, through `dmc hooks status --json`: Claude Code (local scope, per repository)
   and Muse Code (user scope). It reports missing events, and hooks from another dmc build (fix:
-  `dmc disable --apply`, then `dmc hooks install`).
+  `dmc disable --apply`, then `dmc hooks install`). Fix lines name the dmc Doc found, quoted
+  (`"/…/bin/dmc" init`), never a bare `dmc`: macOS ships `/usr/bin/dmc`.
 - **Each provider in use:** its key variable set or not (never the value) and the roles it
   serves. A missing key is FAIL for a primary provider and warn for a fallback. Modal:
   - with no endpoint configured, a warning (summary falls back to Baseten);
@@ -592,18 +624,28 @@ logged Baseten fallback). dmc stays model-free.
 flow below unchanged; anything else (several words are joined) is a request.
 
 1. **Candidates (no model).** The most recent closed checkpoints (default 30, `--limit`), newest
-   first: id, time, agent, session, the label (a label dmc cut to 100 characters is sent with
+   first and numbered from 1: time, agent, session, the label (a label dmc cut to 100 characters is sent with
    the truncation marker) and changed file paths. Labels and paths only, never file contents;
    the whole message is redacted before it is sent. A checkpoint whose latest operation is a
    restore is marked "already undone".
-2. **The model answers in JSON:** `{mode: "go_back_before" | "undo_turn", checkpoint_id,
-   confidence: 0..1, reason, alternatives: [ids]}`. Providers that take it get a
-   `response_format` JSON schema whose ids are an enum of the candidates. Doc parses strictly; a
-   malformed or invalid answer is retried once with the reason, then refused.
-3. **Validation (`planNaturalRestore`, pure and tested).** The id and every alternative must be
-   candidates, or Doc refuses. `undo_turn` is that one checkpoint; `go_back_before` is it and
+2. **The model answers in JSON with list numbers:** `{mode: "go_back_before" | "undo_turn", pick:
+   n, confidence: 0..1, reason, alternatives: [n]}`. Providers that take it get a
+   `response_format` JSON schema whose numbers are an enum of 1..N. Doc maps the numbers to ids.
+   (The list once showed ids, and Muse Spark's reason named turn 3 while its `checkpoint_id` was
+   turn 1's: the 44-character ids differ only in the middle. The model never sees ids now.) Doc
+   parses strictly; a malformed answer, the old `checkpoint_id` shape or a number outside the
+   list is retried once with the reason, then refused.
+3. **Validation (`planNaturalRestore`, pure and tested).** The pick and every alternative must be
+   numbers in the list, or Doc refuses. `undo_turn` is that one checkpoint; `go_back_before` is it and
    every later candidate, newest first, so each step's after state matches the working copy.
    Already-undone checkpoints are skipped. The model never chooses files or actions.
+   **Doc's own check (`crossCheckRestorePlan`, pure):** when the request names files (a path or
+   basename as written, or every word of a file's name, as "critic agent" for
+   `critic_agent.dart`) that the picked turn does not touch but another candidate does, those
+   candidates become alternatives and the confidence drops below 0.6, so the user picks. The
+   reading starts with the picked turn: "Turn 3 of 6 · claude-code · <label> · files: …", plus
+   a "Check:" line when the file check disagreed. `--json` keeps `answer.checkpointId` and adds
+   `answer.pick`.
 4. **The user picks when Doc is unsure.** Below 0.6 confidence, or with alternatives, Doc lists
    the choices (number, time, agent, label, id, files) and waits for a number; Enter cancels.
    **`--yes` never answers this.**
@@ -759,7 +801,10 @@ the note), redacted, to the workhorse role, which writes a title and the three s
 150 words). The title describes the work that was undone, never a rule. **Without a note the
 reason is unknown:** the prompt says so ("Reason it was undone: not stated … Do not guess"),
 Doc writes "Why it failed" as "Not stated — add the reason before approving." whatever the
-model answered, and `doc lesson approve` refuses the draft until that line is edited. (A real
+model answered, and `doc lesson approve` refuses the draft until that line is edited. Each
+refusal says how to fix it, for example: "This draft has no reason for the undo. Add one with:
+doc lesson edit <id> (replace the 'Not stated' line), or redraft with: doc lesson draft
+<checkpoint> --note '…'". (A real
 draft after a natural-language restore had been titled "Do not modify protected auth.py",
 inventing a reason for undoing what was a good security fix.) `files` always comes from the checkpoint's changed paths, never from the model. The
 saved title and body are redacted again, and `approve` refuses anything that still looks like a
@@ -769,14 +814,18 @@ secret.
 dmc knows (the latest checkpoint's manifest, plus lesson files that still exist): an exact
 workspace-relative path, or a basename that matches exactly one file. `--files` adds more.
 Score = how many of a lesson's files are candidates; ties go to the newest; the top 3 with score
-≥ 1 match. Drafts never match. No match means no model call.
+≥ 1 match. Drafts never match (but `doc start` lists drafts that would). No match means no
+model call.
 
 **Starting an agent.** `doc start <agent> "<task>"` prints the brief and asks "Add this to the
 agent's first prompt? [y/N]". The first prompt is the brief, a blank line, then the task (or the
 task alone). The agent is launched interactively: `muse "<prompt>"` (Muse Code 1.4.14:
 `muse [OPTIONS] [PROMPT]` starts the TUI with that prompt submitted) or `claude "<prompt>"`. The
-agent's own hooks create the checkpoints. **`--yes` skips the question; use it only for scripted
-demos.** `DOC_MUSE_BIN` and `DOC_CLAUDE_BIN` override the executables.
+agent's own hooks create the checkpoints. **When no lesson matched**, it names the files it
+checked, lists drafts that would match if approved ("1 draft covers …: <id>. Approve it with:
+doc lesson approve <id>"), and asks "No lesson matched <files>. Start <agent> with the task
+alone? [y/N]", so a missing lesson never scrolls away as the agent opens. **`--yes` skips the
+questions; use it only for scripted demos.** `DOC_MUSE_BIN` and `DOC_CLAUDE_BIN` override the executables.
 
 Verified on 2026-10-28: in `/tmp/lesson-demo`, `doc start muse-code "Add a bulk_discount function
 to pricing.py for orders of 10 or more items" --yes` launched Muse Code, whose first prompt (from

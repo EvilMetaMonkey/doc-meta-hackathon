@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'abandoned_work.dart';
 import 'summarize.dart';
@@ -225,19 +226,21 @@ const String nlRestoreSystemPrompt =
     'You are Doc\'s restore planner for dmc, a rollback safety net for AI '
     'coding agents. The user describes, in their own words, where to go '
     'back to. You get their request and a numbered list of recent '
-    'checkpoints (mostly agent turns), newest first, with each one\'s id, '
+    'checkpoints (mostly agent turns), newest first, with each one\'s '
     'time, agent, prompt label and changed file paths. File contents are '
-    'not available. Choose exactly one checkpoint and a mode. '
+    'not available. Choose exactly one checkpoint, by its number in the '
+    'list, and a mode. '
     '"go_back_before": the user wants the workspace as it was before that '
     'checkpoint, so it and every later checkpoint are undone. "undo_turn": '
     'the user wants only that one checkpoint undone and later ones kept. '
     'Answer with only a JSON object: {"mode": "go_back_before" or '
-    '"undo_turn", "checkpoint_id": an id from the list, "confidence": 0 to '
-    '1, "reason": one short sentence, "alternatives": other ids from the '
-    'list that could also match}. Use only ids from the list. If more than '
-    'one checkpoint could match, list the others in alternatives and lower '
-    'the confidence. Text marked [truncated …] is incomplete: never quote or '
-    'complete it.';
+    '"undo_turn", "pick": the number of that checkpoint in the list (1 is '
+    'the newest), "confidence": 0 to 1, "reason": one short sentence that '
+    'names the same number, "alternatives": the numbers of other '
+    'checkpoints that could also match}. Use only numbers from the list. If '
+    'more than one checkpoint could match, list the others in alternatives '
+    'and lower the confidence. Text marked [truncated …] is incomplete: '
+    'never quote or complete it.';
 
 /// The user message: the request and the candidates (labels and paths
 /// only, never file contents). The router redacts it before sending.
@@ -249,8 +252,7 @@ String nlRestoreUserMessage(String request, List<RestoreCandidate> candidates) {
   for (var i = 0; i < candidates.length; i++) {
     final c = candidates[i];
     buffer
-      ..writeln('${i + 1}. id: ${c.id}')
-      ..writeln('   time: ${c.time} (local)')
+      ..writeln('${i + 1}. time: ${c.time} (local)')
       ..writeln(
         '   ${c.agent == null ? 'source: ${c.source}' : 'agent: ${c.agent}'}'
         '${c.session == null ? '' : ', session ${c.session}'}',
@@ -263,12 +265,14 @@ String nlRestoreUserMessage(String request, List<RestoreCandidate> candidates) {
 }
 
 /// The JSON schema sent as `response_format` to providers that accept it.
-/// The ids are an enum, so a schema-following model can only name a
-/// candidate; Doc validates the answer either way.
+/// The list numbers are an enum, so a schema-following model can only name
+/// a candidate; Doc validates the answer either way. (Numbers, not ids:
+/// the 44-character ids differ only in the middle, and a model once copied
+/// the wrong one while its reason named the right turn.)
 Map<String, Object?> nlRestoreResponseFormat(
   List<RestoreCandidate> candidates,
 ) {
-  final ids = [for (final c in candidates) c.id];
+  final numbers = [for (var i = 1; i <= candidates.length; i++) i];
   return {
     'type': 'json_schema',
     'json_schema': {
@@ -277,24 +281,18 @@ Map<String, Object?> nlRestoreResponseFormat(
       'schema': {
         'type': 'object',
         'additionalProperties': false,
-        'required': [
-          'mode',
-          'checkpoint_id',
-          'confidence',
-          'reason',
-          'alternatives',
-        ],
+        'required': ['mode', 'pick', 'confidence', 'reason', 'alternatives'],
         'properties': {
           'mode': {
             'type': 'string',
             'enum': [for (final mode in NlRestoreMode.values) mode.wire],
           },
-          'checkpoint_id': {'type': 'string', 'enum': ids},
+          'pick': {'type': 'integer', 'enum': numbers},
           'confidence': {'type': 'number'},
           'reason': {'type': 'string'},
           'alternatives': {
             'type': 'array',
-            'items': {'type': 'string', 'enum': ids},
+            'items': {'type': 'integer', 'enum': numbers},
           },
         },
       },
@@ -305,26 +303,39 @@ Map<String, Object?> nlRestoreResponseFormat(
 /// The model's answer, parsed but not yet validated against the candidates.
 class NlRestoreAnswer {
   final NlRestoreMode mode;
-  final String checkpointId;
+
+  /// The 1-based number in the candidate list (newest first).
+  final int pick;
   final double confidence;
   final String reason;
-  final List<String> alternatives;
+
+  /// Other list numbers.
+  final List<int> alternatives;
 
   const NlRestoreAnswer({
     required this.mode,
-    required this.checkpointId,
+    required this.pick,
     required this.confidence,
     required this.reason,
     required this.alternatives,
   });
 
-  Map<String, Object?> toJson() => {
-    'mode': mode.wire,
-    'checkpointId': checkpointId,
-    'confidence': confidence,
-    'reason': reason,
-    'alternatives': alternatives,
-  };
+  /// For `--json`: the numbers, and (when in range) the ids they name, as
+  /// before (`checkpointId`, `alternatives` as ids).
+  Map<String, Object?> toJson(List<RestoreCandidate> candidates) {
+    String? id(int number) => number >= 1 && number <= candidates.length
+        ? candidates[number - 1].id
+        : null;
+    return {
+      'mode': mode.wire,
+      'pick': pick,
+      'checkpointId': id(pick),
+      'confidence': confidence,
+      'reason': reason,
+      'alternatives': [for (final n in alternatives) ?id(n)],
+      'alternativePicks': alternatives,
+    };
+  }
 }
 
 /// Why Doc will not act on a model answer.
@@ -357,9 +368,11 @@ NlRestoreAnswer parseNlRestoreAnswer(String content) {
       '"mode" must be "go_back_before" or "undo_turn", not ${jsonEncode(json['mode'])}.',
     );
   }
-  final id = json['checkpoint_id'];
-  if (id is! String || id.isEmpty) {
-    throw const NlRestoreRefused('"checkpoint_id" must be a string.');
+  final pick = json['pick'];
+  if (pick is! int) {
+    throw NlRestoreRefused(
+      '"pick" must be the checkpoint\'s number in the list (an integer)${json.containsKey('checkpoint_id') ? ', not a "checkpoint_id"' : ''}.',
+    );
   }
   final confidence = json['confidence'];
   if (confidence is! num || confidence < 0 || confidence > 1) {
@@ -370,15 +383,17 @@ NlRestoreAnswer parseNlRestoreAnswer(String content) {
     throw const NlRestoreRefused('"reason" must be a string.');
   }
   final alternatives = json['alternatives'] ?? const [];
-  if (alternatives is! List || alternatives.any((a) => a is! String)) {
-    throw const NlRestoreRefused('"alternatives" must be a list of ids.');
+  if (alternatives is! List || alternatives.any((a) => a is! int)) {
+    throw const NlRestoreRefused(
+      '"alternatives" must be a list of list numbers.',
+    );
   }
   return NlRestoreAnswer(
     mode: mode,
-    checkpointId: id,
+    pick: pick,
     confidence: confidence.toDouble(),
     reason: reason.trim(),
-    alternatives: alternatives.cast<String>(),
+    alternatives: alternatives.cast<int>(),
   );
 }
 
@@ -406,6 +421,7 @@ class NlRestorePlan {
     required this.alternatives,
     required this.steps,
     required this.alreadyUndone,
+    this.crossCheck,
   });
 
   /// Low confidence or alternatives: the user must pick (never `--yes`).
@@ -414,6 +430,10 @@ class NlRestorePlan {
 
   /// What the user picks from: the model's choice first, then alternatives.
   List<RestoreCandidate> get choices => [target, ...alternatives];
+
+  /// Set when Doc's file check disagreed with the model (see
+  /// [crossCheckRestorePlan]); the user must pick.
+  final String? crossCheck;
 
   /// The oldest checkpoint undone: the one a lesson is drafted from.
   RestoreCandidate? get oldestStep => steps.isEmpty ? null : steps.last;
@@ -427,30 +447,31 @@ class NlRestorePlan {
     'needsChoice': needsChoice,
     'steps': [for (final c in steps) c.id],
     'alreadyUndone': [for (final c in alreadyUndone) c.id],
+    'crossCheck': crossCheck,
   };
 }
 
 /// Turn a parsed model answer into a plan. Pure and deterministic: the
-/// model only names a mode and a checkpoint; the steps follow from the
-/// candidates ([candidates] newest first). An id that is not a candidate
-/// is refused.
+/// model only names a mode and a list number; the steps follow from the
+/// candidates ([candidates] newest first). A number outside the list is
+/// refused.
 NlRestorePlan planNaturalRestore(
   NlRestoreAnswer answer,
   List<RestoreCandidate> candidates,
 ) {
-  RestoreCandidate find(String id, String what) {
-    for (final candidate in candidates) {
-      if (candidate.id == id) return candidate;
+  RestoreCandidate find(int number, String what) {
+    if (number < 1 || number > candidates.length) {
+      throw NlRestoreRefused(
+        'The model picked $what $number, but the list has ${candidates.length} checkpoint(s) (1-${candidates.length}). Doc only restores a checkpoint it offered.',
+      );
     }
-    throw NlRestoreRefused(
-      'The model named $what $id, which is not one of the ${candidates.length} candidate checkpoint(s). Doc only restores a checkpoint it offered.',
-    );
+    return candidates[number - 1];
   }
 
-  final target = find(answer.checkpointId, 'checkpoint');
+  final target = find(answer.pick, 'number');
   final alternatives = <RestoreCandidate>[];
-  for (final id in answer.alternatives) {
-    final alternative = find(id, 'alternative');
+  for (final number in answer.alternatives) {
+    final alternative = find(number, 'alternative');
     if (alternative.id != target.id && !alternatives.contains(alternative)) {
       alternatives.add(alternative);
     }
@@ -463,6 +484,106 @@ NlRestorePlan planNaturalRestore(
     reason: answer.reason,
     alternatives: alternatives,
   );
+}
+
+/// Words of a file name, for matching against a request:
+/// `lib/critic_agent.dart` → {critic, agent}; `checkoutFlow.ts` →
+/// {checkout, flow}.
+Set<String> _nameParts(String path) {
+  final stem = path.split('/').last.split('.').first;
+  return {
+    for (final part
+        in stem
+            .replaceAllMapped(
+              RegExp(r'([a-z0-9])([A-Z])'),
+              (m) => '${m[1]} ${m[2]}',
+            )
+            .toLowerCase()
+            .split(RegExp(r'[^a-z0-9]+')))
+      if (part.isNotEmpty) part,
+  };
+}
+
+/// The candidates' files that [request] names: a path or basename written
+/// out (`critic_agent.dart`), or every word of the file's name
+/// (`critic agent`; a one-word name counts only with 4 or more letters).
+/// Pure; no model.
+Set<String> filesNamedInRequest(
+  String request,
+  List<RestoreCandidate> candidates,
+) {
+  final lower = request.toLowerCase();
+  final words = {
+    for (final word in lower.split(RegExp(r'[^a-z0-9]+')))
+      if (word.isNotEmpty) word,
+  };
+  final named = <String>{};
+  for (final candidate in candidates) {
+    for (final file in candidate.files) {
+      final path = file.path;
+      final base = path.split('/').last.toLowerCase();
+      final parts = _nameParts(path);
+      final spelled =
+          lower.contains(path.toLowerCase()) || lower.contains(base);
+      final worded =
+          parts.isNotEmpty &&
+          (parts.length > 1 || parts.single.length >= 4) &&
+          words.containsAll(parts);
+      if (spelled || worded) named.add(path);
+    }
+  }
+  return named;
+}
+
+/// Doc's own check of the model's pick: when the request names files
+/// ([filesNamedInRequest]) that the picked turn does not touch but other
+/// candidates do, those candidates become alternatives and the confidence
+/// drops below [nlRestoreMinConfidence], so the user picks. Otherwise the
+/// plan is returned unchanged.
+NlRestorePlan crossCheckRestorePlan(
+  NlRestorePlan plan,
+  String request,
+  List<RestoreCandidate> candidates,
+) {
+  final named = filesNamedInRequest(request, candidates);
+  if (named.isEmpty) return plan;
+  bool touches(RestoreCandidate c) =>
+      c.files.any((file) => named.contains(file.path));
+  if (touches(plan.target)) return plan;
+  final others = [
+    for (final c in candidates)
+      if (c != plan.target && touches(c)) c,
+  ];
+  if (others.isEmpty) return plan;
+  String number(RestoreCandidate c) => '${candidates.indexOf(c) + 1}';
+  final files = (named.toList()..sort()).join(', ');
+  return NlRestorePlan(
+    mode: plan.mode,
+    target: plan.target,
+    confidence: min(plan.confidence, nlRestoreMinConfidence - 0.1),
+    reason: plan.reason,
+    alternatives: [
+      ...others,
+      for (final c in plan.alternatives)
+        if (!others.contains(c)) c,
+    ],
+    steps: plan.steps,
+    alreadyUndone: plan.alreadyUndone,
+    crossCheck:
+        'Your request names $files, which turn ${number(plan.target)} does not touch; ${others.length == 1 ? 'turn ${number(others.single)} does' : 'turns ${others.map(number).join(', ')} do'}.',
+  );
+}
+
+/// The picked turn for people, up front: "Turn 3 of 6 · claude-code ·
+/// label · files: paths".
+String nlTurnSummary(
+  RestoreCandidate target,
+  List<RestoreCandidate> candidates,
+) {
+  final files = target.files.isEmpty
+      ? '(no files changed)'
+      : target.files.map((f) => f.path).join(', ');
+  return 'Turn ${candidates.indexOf(target) + 1} of ${candidates.length} · ${target.who} · ${target.displayLabel} · files: $files';
 }
 
 /// The plan for [mode] on [target] (also used after the user picks).

@@ -4,8 +4,12 @@ library;
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:dmc_doc/doc.dart';
 import 'package:path/path.dart' as p;
 import 'package:test/test.dart';
+
+/// Stands in for a stdin that cannot be read.
+int _unreadable() => throw const StdinException('the terminal is gone');
 
 /// The real StdinTalkTerminal, in a subprocess whose stdin is a pipe (the
 /// talk CLI tests use a fake terminal and never reach it).
@@ -56,6 +60,16 @@ void main() {
       'key cancel',
       'key cancel',
     ]);
+  });
+
+  test('a read error is logged once, then counts as Esc', () async {
+    final logged = <String>[];
+    final terminal = StdinTalkTerminal(readByte: _unreadable, log: logged.add);
+    expect(await terminal.readKey(), TalkKey.cancel);
+    expect(await terminal.readKey(), TalkKey.cancel);
+    expect(logged, hasLength(1));
+    expect(logged.single, startsWith('[doc] could not read the key: '));
+    expect(logged.single, contains('the terminal is gone'));
   });
 
   test('a later readLineSync gets the rest of the input', () async {

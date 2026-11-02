@@ -166,6 +166,24 @@ class Lesson {
     );
   }
 
+  /// Each problem that blocks approval with how to fix it, or an empty
+  /// list.
+  List<String> approvalProblems() => [
+    if (body.contains(unstatedReason))
+      'This draft has no reason for the undo. Add one with: doc lesson edit $id (replace the \'Not stated\' line), or redraft with: doc lesson draft ${source.checkpoint} --note \'…\''
+    else if (body.trim().isEmpty)
+      'The body is empty. Write what was tried, why it failed and what to do instead with: doc lesson edit $id',
+    if (!RegExp(r'^[a-z0-9][a-z0-9-]*$').hasMatch(id))
+      'The id "$id" must be lowercase letters, digits and dashes. Fix the id line with: doc lesson edit $id',
+    if (title.trim().isEmpty)
+      'The title is empty. Add one with: doc lesson edit $id',
+    if (files.isEmpty)
+      'It covers no files, so it could never match. Add workspace-relative paths under "files:" with: doc lesson edit $id',
+    for (final file in files)
+      if (!isSafeRelativePath(file))
+        'The file "$file" is not a workspace-relative path (like lib/main.dart). Fix it with: doc lesson edit $id',
+  ];
+
   /// Problems that block approval, or an empty list.
   List<String> problems() => [
     if (!RegExp(r'^[a-z0-9][a-z0-9-]*$').hasMatch(id))
@@ -360,17 +378,18 @@ Set<String> candidateFiles(
   return candidates;
 }
 
-/// Score each approved lesson by how many of its files are candidates; keep
-/// those scoring at least 1, highest first, newest first on ties, at most
-/// [limit].
+/// Score each approved lesson (or each lesson with [status], for drafts)
+/// by how many of its files are candidates; keep those scoring at least 1,
+/// highest first, newest first on ties, at most [limit].
 List<LessonMatch> matchLessons(
   Iterable<Lesson> lessons,
   Set<String> candidates, {
   int limit = 3,
+  String status = 'approved',
 }) {
   final matches = [
     for (final lesson in lessons)
-      if (lesson.status == 'approved')
+      if (lesson.status == status)
         LessonMatch(lesson, [
           for (final file in lesson.files)
             if (candidates.contains(file)) file,
@@ -383,6 +402,36 @@ List<LessonMatch> matchLessons(
     return byDate != 0 ? byDate : a.lesson.id.compareTo(b.lesson.id);
   });
   return matches.take(limit).toList();
+}
+
+/// One line saying which lessons matched which files, for people.
+String lessonMatchSummary(List<LessonMatch> matches, Set<String> candidates) {
+  if (candidates.isEmpty) {
+    return 'No lesson matched: the task names no known file to check.';
+  }
+  final files = (candidates.toList()..sort()).join(', ');
+  if (matches.isEmpty) return 'No lesson matched $files.';
+  return 'Lessons matched on $files: ${matches.map((m) => '${m.lesson.id} (${m.matchedFiles.join(', ')})').join('; ')}.';
+}
+
+/// Drafts that would match if approved, for people.
+List<String> draftMatchLines(List<LessonMatch> drafts) => [
+  if (drafts.length == 1)
+    '1 draft covers ${drafts.single.matchedFiles.join(', ')}: ${drafts.single.lesson.id}. Approve it with: doc lesson approve ${drafts.single.lesson.id}'
+  else if (drafts.isNotEmpty) ...[
+    '${drafts.length} drafts cover these files:',
+    for (final draft in drafts)
+      '  ${draft.lesson.id} (${draft.matchedFiles.join(', ')}). Approve it with: doc lesson approve ${draft.lesson.id}',
+  ],
+];
+
+/// `doc start`'s question when no lesson matched: which files were
+/// checked, and whether to start with the task alone.
+String noLessonQuestion(Set<String> candidates, String agent) {
+  final files = candidates.isEmpty
+      ? 'any file (the task names no known file; add --files <path> to check one)'
+      : (candidates.toList()..sort()).join(', ');
+  return 'No lesson matched $files. Start $agent with the task alone? [y/N] ';
 }
 
 /// The agent's first prompt: the brief, a blank line, then the task, or the

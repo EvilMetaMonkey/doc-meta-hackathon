@@ -36,6 +36,7 @@ String plan(List<(String, String)> items) => jsonEncode({
               'FAKE-WRONG' => 'FAKE-WRONG: add a notes file explaining the state instead.',
               'FAKE-FAIL' => 'FAKE-FAIL: rewrite the whole module from scratch carefully.',
               'FAKE-NOOP' => 'FAKE-NOOP: only read the files and report what you see.',
+              'FAKE-BASH' => 'FAKE-BASH: check your work with a shell command at the end.',
               _ => 'FAKE-HANG: think about it for a very long time first.',
             }}',
         'files_likely': ['state.txt'],
@@ -347,10 +348,20 @@ void main() {
       final args = (call['args'] as List).cast<String>();
       expect(args.first, 'exec');
       expect(args, containsAllInOrder(['--max-model-steps', '5']));
-      expect(args, containsAll(['--disable-web-tools', '--json']));
+      expect(
+        args,
+        containsAll(['--disable-web-tools', '--disable-shell', '--json']),
+      );
       expect(args, isNot(contains('--yolo')));
       expect(args, isNot(contains('--disable-approval')));
       expect(args[1], contains('Task: make the tests pass again'));
+      expect(
+        args[1],
+        endsWith(
+          'You cannot run commands. Doc runs the tests here after you finish with: $goodTest',
+        ),
+      );
+      expect(args[1], isNot(contains('When you are done')));
       String real(String path) => Directory(path).resolveSymbolicLinksSync();
       expect(
         timelines.map((t) => real(t['worktree'] as String)),
@@ -368,6 +379,8 @@ void main() {
     expect((timelines[1]['test'] as Map)['passed'], isFalse);
     expect(timelines[1]['reason'], contains('2 step(s)'));
     expect((timelines[2]['test'] as Map)['passed'], isFalse);
+    // Killed before run.usage: the steps are counted from the events.
+    expect(timelines[2]['steps'], 4);
     expect(
       timelines[0]['costUsd'],
       closeTo((30000 * 0.10 + 30000 * 0.002 + 300 * 0.20) / 1e6, 1e-9),
@@ -385,7 +398,7 @@ void main() {
       text,
       contains('[2] Rewrite the module\n    agent: step limit, 2 step(s)'),
     );
-    expect(text, contains('[3] Think first\n    agent: timed out'));
+    expect(text, contains('[3] Think first\n    agent: timed out, 4 step(s)'));
     expect(text, contains('Pick one with: doc timelines pick $id <k>'));
 
     // Branches hold each agent's commit; the user's repo is untouched.
@@ -572,6 +585,53 @@ void main() {
     }
     expect('$err', contains('stopping all agents'));
     expect(await branches(), hasLength(3));
+  });
+
+  test('an agent waiting for shell approval is stopped as stalled, well '
+      'before the timeout, with its steps so far', () async {
+    final meta = await planner(
+      plan([
+        ('Put the value back', 'FAKE-FIX'),
+        ('Check with a command', 'FAKE-BASH'),
+        ('Leave a note', 'FAKE-WRONG'),
+      ]),
+    );
+    final clock = Stopwatch()..start();
+    expect(
+      await doc(
+        ['timelines', 'fix it', '--test', goodTest, '--yes'],
+        deps: const TimelineDeps(
+          statusEvery: Duration(seconds: 1),
+          agentTimeout: Duration(minutes: 5),
+          stall: Duration(seconds: 2),
+        ),
+      ),
+      0,
+      reason: '$out\n$err',
+    );
+    expect(clock.elapsed, lessThan(const Duration(seconds: 60)));
+    final timelines = (runJson()['timelines'] as List).cast<Map>();
+    expect(timelines.map((t) => t['status']), ['done', 'stalled', 'done']);
+    expect(timelines[1]['steps'], 2);
+    expect(
+      timelines[1]['reason'],
+      'waiting for approval to run a shell command (Doc runs agents without a shell)',
+    );
+    expect((timelines[1]['seconds'] as num), lessThan(30));
+    final text = '$out';
+    expect(text, contains('[timeline 2] stopped (stalled) after 0:0'));
+    expect(
+      text,
+      contains(
+        '2 step(s) (waiting for approval to run a shell command (Doc runs agents without a shell))',
+      ),
+    );
+    expect(text, contains('stopped after 2 s without progress'));
+    // The planner was told the agents have no shell.
+    final system =
+        ((meta.requests.first.body!['messages'] as List)[0] as Map)['content']
+            as String;
+    expect(system, contains('never tell an agent to run tests or commands'));
   });
 
   test('--local refuses hosted planning', () async {
@@ -848,6 +908,243 @@ void main() {
     final timelines = (run['timelines'] as List).cast<Map>();
     expect((timelines[0]['test'] as Map)['passed'], isTrue);
     expect((timelines[1]['test'] as Map)['passed'], isFalse);
+  });
+
+  test('--from-bisect: the planner gets the bad turn\'s prompt, files, diff '
+      'and bisect\'s explanation; lessons match on that turn\'s files and '
+      'reach the planner, the agents and the judge', () async {
+    final meta = await FakeProvider.start([
+      FakeReply.chat('The turn wrote bad into state.txt.'),
+      FakeReply.chat('Before you start: keep state.txt saying good.'),
+      FakeReply.chat(
+        plan([
+          ('Put the value back', 'FAKE-FIX'),
+          ('Write notes', 'FAKE-WRONG'),
+        ]),
+        model: 'muse-wonder-1.0',
+      ),
+      FakeReply.chat(
+        judged([(1, 9, 'Fixes it.'), (2, 2, 'Leaves the bug.')], 1),
+        model: 'muse-wonder-1.0',
+      ),
+    ]);
+    addTearDown(meta.close);
+    File(p.join(home.path, 'config', 'config.json'))
+      ..createSync(recursive: true)
+      ..writeAsStringSync(
+        jsonEncode({
+          'providers': {
+            'meta': {'baseUrl': meta.baseUrl},
+          },
+        }),
+      );
+    // An approved lesson about state.txt. The task names no file; the bad
+    // turn changed state.txt.
+    final listed = await Process.run(dmc, [
+      'checkpoint',
+      'list',
+      '--limit',
+      '1',
+      '--json',
+    ], workingDirectory: repo.path);
+    final fingerprint =
+        ((jsonDecode('${listed.stdout}') as Map)['workspace']
+                as Map)['fingerprint']
+            as String;
+    File(
+        p.join(
+          home.path,
+          'data',
+          'lessons',
+          fingerprint.replaceFirst('sha256:', '').substring(0, 24),
+          'library',
+          'keep-state-good.md',
+        ),
+      )
+      ..createSync(recursive: true)
+      ..writeAsStringSync(
+        '---\nid: "keep-state-good"\ntitle: "Keep state.txt good"\nfiles:\n  - "state.txt"\n'
+        'created: "2026-11-01T00:00:00.000Z"\nsource:\n  checkpoint: "${ids[1]}"\nstatus: "approved"\n---\n\n'
+        '## What was tried\nWriting bad.\n## Why it failed\nThe tests want good.\n## What to do instead\nKeep good.\n',
+      );
+    expect(
+      await doc([
+        'bisect',
+        '--test',
+        goodTest,
+        '--role-provider',
+        'workhorse=meta',
+      ]),
+      0,
+      reason: '$out\n$err',
+    );
+    out.clear();
+    expect(
+      await doc([
+        'timelines',
+        'fix it',
+        '--from-bisect',
+        '--n',
+        '2',
+        '--yes',
+        '--role-provider',
+        'summary=meta',
+      ]),
+      0,
+      reason: '$out\n$err',
+    );
+    final text = '$out';
+    expect(
+      text,
+      contains(
+        'Lessons matched on feature2.txt, state.txt: keep-state-good (state.txt).',
+      ),
+    );
+    expect(text, contains('Lesson brief ('));
+    String user(int request) =>
+        ((meta.requests[request].body!['messages'] as List)[1]
+                as Map)['content']
+            as String;
+    final planner = user(2);
+    expect(
+      planner,
+      contains(
+        'Bisect found the turn that broke the tests; the starting state is right after it.',
+      ),
+    );
+    expect(planner, contains('That turn\'s prompt: '));
+    expect(planner, contains('That turn changed: '));
+    expect(planner, contains('state.txt (modified)'));
+    expect(planner, contains('That turn\'s diff (before → after):'));
+    expect(planner, contains('-good'));
+    expect(planner, contains('+bad'));
+    expect(
+      planner,
+      contains('Bisect\'s explanation: The turn wrote bad into state.txt.'),
+    );
+    expect(
+      planner,
+      contains(
+        'Lessons from earlier attempts: Before you start: keep state.txt saying good.',
+      ),
+    );
+    final system =
+        ((meta.requests[2].body!['messages'] as List)[0] as Map)['content']
+            as String;
+    expect(
+      system,
+      contains('one approach may revert or partly revert that turn'),
+    );
+    expect(system, contains('Prefer the smallest change'));
+    // The agents get the brief; the judge sees the lessons.
+    final calls = [
+      for (final entry in Directory(museLog).listSync())
+        jsonDecode(File(entry.path).readAsStringSync()) as Map,
+    ];
+    for (final call in calls) {
+      expect(
+        (call['args'] as List)[1],
+        startsWith('Before you start: keep state.txt saying good.'),
+      );
+    }
+    expect(
+      user(3),
+      contains(
+        'Lessons from earlier attempts: Before you start: keep state.txt saying good.',
+      ),
+    );
+    expect(
+      ((meta.requests[3].body!['messages'] as List)[0] as Map)['content'],
+      contains('goes against one'),
+    );
+    expect(runJson()['lessons'], ['keep-state-good']);
+  });
+
+  test('a lesson for a file only the plan names is matched after planning '
+      'and given to the agents', () async {
+    final meta = await FakeProvider.start([
+      FakeReply.chat(
+        plan([
+          ('Put the value back', 'FAKE-FIX'),
+          ('Write notes', 'FAKE-WRONG'),
+        ]),
+        model: 'muse-wonder-1.0',
+      ),
+      FakeReply.chat('Before you start: keep state.txt saying good.'),
+    ]);
+    addTearDown(meta.close);
+    File(p.join(home.path, 'config', 'config.json'))
+      ..createSync(recursive: true)
+      ..writeAsStringSync(
+        jsonEncode({
+          'providers': {
+            'meta': {'baseUrl': meta.baseUrl},
+          },
+        }),
+      );
+    final listed = await Process.run(dmc, [
+      'checkpoint',
+      'list',
+      '--limit',
+      '1',
+      '--json',
+    ], workingDirectory: repo.path);
+    final fingerprint =
+        ((jsonDecode('${listed.stdout}') as Map)['workspace']
+                as Map)['fingerprint']
+            as String;
+    File(
+        p.join(
+          home.path,
+          'data',
+          'lessons',
+          fingerprint.replaceFirst('sha256:', '').substring(0, 24),
+          'library',
+          'keep-state-good.md',
+        ),
+      )
+      ..createSync(recursive: true)
+      ..writeAsStringSync(
+        '---\nid: "keep-state-good"\ntitle: "Keep state.txt good"\nfiles:\n  - "state.txt"\n'
+        'created: "2026-11-01T00:00:00.000Z"\nsource:\n  checkpoint: "${ids[1]}"\nstatus: "approved"\n---\n\n'
+        '## What was tried\nWriting bad.\n## Why it failed\nThe tests want good.\n## What to do instead\nKeep good.\n',
+      );
+    expect(
+      await doc([
+        'timelines',
+        'make the tests pass again',
+        '--test',
+        goodTest,
+        '--n',
+        '2',
+        '--yes',
+        '--no-judge',
+        '--role-provider',
+        'summary=meta',
+      ]),
+      0,
+      reason: '$out\n$err',
+    );
+    final text = '$out';
+    expect(
+      text,
+      contains('No lesson matched: the task names no known file to check.'),
+    );
+    expect(
+      text,
+      contains(
+        "With the plan's files: Lessons matched on state.txt: keep-state-good (state.txt).",
+      ),
+    );
+    expect(text, contains('Lesson brief for the agents ('));
+    for (final entry in Directory(museLog).listSync()) {
+      final call = jsonDecode(File(entry.path).readAsStringSync()) as Map;
+      expect(
+        (call['args'] as List)[1],
+        startsWith('Before you start: keep state.txt saying good.'),
+      );
+    }
+    expect(runJson()['lessons'], ['keep-state-good']);
   });
 
   test('the estimate names Muse Code\'s configured model; --agent-model '

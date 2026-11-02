@@ -48,13 +48,64 @@ const String timelinePlannerSystemPrompt =
     'exactly the requested number of approaches that are clearly different '
     '(different ideas or places to change, not rewordings). Each has a '
     'short title, a plan of at most 120 words written to the agent, and the '
-    'files it will likely touch (paths from the file list). Use only the '
-    'facts given; file contents are not available. Text marked '
+    'files it will likely touch (paths from the file list). The agents '
+    'cannot run commands (they have no shell): Doc runs the tests after each '
+    'attempt, so never tell an agent to run tests or commands. Prefer the '
+    'smallest change that makes the tests pass. When the starting state is '
+    'right after the turn that broke the tests (bisect facts are given), one '
+    'approach may revert or partly revert that turn; the approaches must '
+    'still differ. If lessons from earlier attempts are given, no approach '
+    'may go against them. Use only the facts given; file contents are not '
+    'available except the bisect diff. Text marked '
     '[truncated …] is incomplete: never quote or complete it. Answer with '
     'only a JSON object: {"approaches": [{"title", "plan", "files_likely"}]}.';
 
+/// The agent prompt's last line: the agent has no shell (`--disable-shell`),
+/// so Doc runs the tests.
+String timelineAgentTestLine(String test) =>
+    'Work only in this folder. You cannot run commands. Doc runs the tests here after you finish with: $test';
+
+/// What `doc bisect` found, for a run started with `--from-bisect`: the
+/// first bad turn is the base.
+class TimelineBisectFacts {
+  final String? label;
+  final List<String> changedFiles;
+
+  /// The turn's before → after diff ([abandonedDiff]: same limits, and
+  /// secret-bearing files named only). Null when the export failed.
+  final String? diff;
+
+  /// Bisect's saved explanation, when it had one.
+  final String? explanation;
+
+  const TimelineBisectFacts({
+    required this.label,
+    required this.changedFiles,
+    required this.diff,
+    required this.explanation,
+  });
+}
+
+/// The bisect lines of the planner's message.
+List<String> timelineBisectLines(TimelineBisectFacts facts) => [
+  'Bisect found the turn that broke the tests; the starting state is right after it.',
+  'That turn\'s prompt: ${facts.label == null
+      ? '(none)'
+      : facts.label!.endsWith('…')
+      ? '${facts.label!.substring(0, facts.label!.length - 1).trimRight()} $truncatedLabelMarker'
+      : facts.label}',
+  'That turn changed: ${facts.changedFiles.isEmpty ? '(no files)' : facts.changedFiles.join(', ')}',
+  if (facts.diff != null && facts.diff!.isNotEmpty) ...[
+    'That turn\'s diff (before → after):',
+    facts.diff!,
+  ],
+  if (facts.explanation != null && facts.explanation!.trim().isNotEmpty)
+    'Bisect\'s explanation: ${facts.explanation!.trim()}',
+];
+
 /// The planner's user message: task, brief, base checkpoint and file
-/// names (never contents). The router redacts it before sending.
+/// names (contents only in the bisect diff). The router redacts it before
+/// sending.
 String timelinePlannerMessage({
   required String task,
   required int n,
@@ -64,6 +115,7 @@ String timelinePlannerMessage({
   required List<String> baseChanged,
   required List<String> files,
   required String test,
+  TimelineBisectFacts? bisect,
 }) {
   final label = baseLabel == null
       ? '(none)'
@@ -79,6 +131,7 @@ String timelinePlannerMessage({
     'Starting state: $baseDescription',
     'That checkpoint\'s label: $label',
     'Files that checkpoint changed: ${baseChanged.isEmpty ? '(none)' : baseChanged.join(', ')}',
+    if (bisect != null) ...timelineBisectLines(bisect),
     'Files in the starting state (${files.length}):',
     for (final file in files.take(400)) '- $file',
     if (files.length > 400) '- … and ${files.length - 400} more',
@@ -281,22 +334,101 @@ class MuseOutcome {
   bool get stepLimit => reason?.contains('step(s)') ?? false;
 }
 
+/// Seconds without a new Muse Code event before Doc stops an agent.
+const int timelineDefaultStallSeconds = 90;
+
+/// What one Muse Code event line says about progress: the type, and for a
+/// task lifecycle event its kind and the task's kind (when given).
+({String? type, String? lifecycle, String? taskKind})? _museEvent(String line) {
+  if (!line.trimLeft().startsWith('{')) return null;
+  final Object? event;
+  try {
+    event = jsonDecode(line);
+  } on FormatException {
+    return null;
+  }
+  if (event is! Map) return null;
+  final type = event['payload_type'];
+  final payload = event['payload'];
+  final inner = payload is Map ? payload['event'] : null;
+  return (
+    type: type is String ? type : null,
+    lifecycle: inner is Map ? inner['kind'] as String? : null,
+    taskKind: inner is Map ? inner['task_kind'] as String? : null,
+  );
+}
+
+/// Muse Code's progress so far, fed one `--json` line at a time while the
+/// agent runs (verified on Mike's Mac, 2026-11-01, muse 1.4.14).
+///
+/// - Each model call starts as a `task.lifecycle.proposed` task of kind
+///   `model.meta.response`; their count equals `run.usage.calls` in every
+///   completed run, so it counts steps when the run is stopped before
+///   `run.usage` arrives.
+/// - A tool task (`tool.bash`, `tool.edit_file`, …) is proposed, then
+///   `accepted` and run. When approval is needed and nobody can give it,
+///   the proposal is the last event and nothing follows.
+class MuseProgress {
+  int _steps = 0;
+  String? _lastType;
+  String? _lastLifecycle;
+  String? _lastTaskKind;
+
+  void add(String line) {
+    final event = _museEvent(line);
+    if (event == null || event.type == null) return;
+    _lastType = event.type;
+    _lastLifecycle = event.lifecycle;
+    _lastTaskKind = event.taskKind;
+    if (event.type == 'task.lifecycle.proposed' &&
+        (event.taskKind?.startsWith('model.') ?? false)) {
+      _steps++;
+    }
+  }
+
+  /// Model steps started so far.
+  int get steps => _steps;
+
+  /// The tool kind waiting for approval: the last event proposed a tool
+  /// task and nothing has followed it.
+  String? get awaitingApproval =>
+      _lastType == 'task.lifecycle.proposed' &&
+          _lastLifecycle == 'proposed' &&
+          (_lastTaskKind?.startsWith('tool.') ?? false)
+      ? _lastTaskKind
+      : null;
+}
+
+/// Why Doc stopped an agent that sent no event for [stall].
+String timelineStallReason(String? awaitingTool, Duration stall) {
+  if (awaitingTool == 'tool.bash') {
+    return 'waiting for approval to run a shell command (Doc runs agents without a shell)';
+  }
+  if (awaitingTool != null) {
+    return 'waiting for approval to use ${awaitingTool.substring('tool.'.length)} (nobody can approve it here)';
+  }
+  return 'no progress for ${stall.inSeconds} s';
+}
+
 /// Read Muse Code 1.4.14's `--json` event lines (verified on Mike's Mac,
 /// 2026-10-28): `run.usage` carries `models[{model, input_tokens,
 /// cached_tokens, output_tokens}]` and `calls` (model steps), and
 /// `run.terminal.completed` / `run.terminal.failed` carry `terminal`,
 /// `text` and `reason` (for example "model did not reach a terminal state
-/// within 8 step(s)"). Unknown lines are ignored.
+/// within 8 step(s)"). A run stopped before `run.usage` counts its steps
+/// from the events ([MuseProgress]). Unknown lines are ignored.
 MuseOutcome parseMuseEvents(Iterable<String> lines) {
+  final progress = MuseProgress();
+  int? calls;
   String? terminal;
   String? reason;
   String? model;
-  var steps = 0;
   var input = 0;
   var cached = 0;
   var output = 0;
   var text = '';
   for (final line in lines) {
+    progress.add(line);
     if (!line.trimLeft().startsWith('{')) continue;
     final Object? event;
     try {
@@ -309,7 +441,7 @@ MuseOutcome parseMuseEvents(Iterable<String> lines) {
     final payload = event['payload'];
     if (payload is! Map) continue;
     if (type == 'run.usage') {
-      steps = (payload['calls'] as num?)?.toInt() ?? steps;
+      calls = (payload['calls'] as num?)?.toInt() ?? calls;
       input = cached = output = 0;
       for (final m
           in (payload['models'] as List? ?? const []).whereType<Map>()) {
@@ -328,7 +460,7 @@ MuseOutcome parseMuseEvents(Iterable<String> lines) {
     terminal: terminal,
     reason: reason,
     model: model,
-    steps: steps,
+    steps: calls ?? progress.steps,
     inputTokens: input,
     cachedTokens: cached,
     outputTokens: output,
@@ -472,7 +604,17 @@ class TimelineTest {
 }
 
 /// Agent status of one timeline.
-enum TimelineStatus { pending, running, done, failed, timedOut, stopped }
+enum TimelineStatus {
+  pending,
+  running,
+  done,
+  failed,
+  timedOut,
+  stopped,
+
+  /// No event for the stall time; Doc stopped it ([Timeline.reason] says why).
+  stalled,
+}
 
 /// One timeline: its approach, worktree, branch, agent result and tests.
 class Timeline {
@@ -579,6 +721,9 @@ class TimelineRun {
   /// The "timeline base" commit every timeline branch starts from.
   String? baseCommit;
   final String? brief;
+
+  /// The approved lessons the brief came from (ids).
+  final List<String> lessons;
   final Map<String, Object?> planner;
   final List<Timeline> timelines;
 
@@ -607,6 +752,7 @@ class TimelineRun {
     required this.baseLabel,
     required this.baseCommit,
     required this.brief,
+    this.lessons = const [],
     required this.planner,
     required this.timelines,
     this.status = 'planned',
@@ -643,6 +789,7 @@ class TimelineRun {
       'commit': baseCommit,
     },
     'brief': brief,
+    'lessons': lessons,
     'planner': planner,
     'timelines': [
       for (final t in timelines) {...t.toJson(), 'pick': pickState(t)},
@@ -670,6 +817,7 @@ class TimelineRun {
       baseLabel: base['label'] as String?,
       baseCommit: base['commit'] as String?,
       brief: json['brief'] as String?,
+      lessons: [for (final id in (json['lessons'] as List? ?? const [])) '$id'],
       planner: ((json['planner'] as Map?) ?? const {}).cast<String, Object?>(),
       timelines: [
         for (final t in (json['timelines'] as List).whereType<Map>())
@@ -694,6 +842,7 @@ String _statusText(Timeline t) => switch (t.status) {
     t.reason != null && t.reason!.contains('step(s)') ? 'step limit' : 'failed',
   TimelineStatus.timedOut => 'timed out',
   TimelineStatus.stopped => 'stopped',
+  TimelineStatus.stalled => 'stalled',
   TimelineStatus.running => 'running',
   TimelineStatus.pending => 'not run',
 };
@@ -770,7 +919,9 @@ const String timelineJudgeSystemPrompt =
     'than planned), and describe in at most 25 words what the diff actually '
     'does. Recommend one timeline only if its tests passed; otherwise '
     'recommend none (null). A timeline with no changes did nothing. Use '
-    'only the facts and diffs given. Text marked [truncated …] is '
+    'only the facts and diffs given. If lessons from earlier attempts are '
+    'given, say in the rationale and risks when a timeline goes against one. '
+    'Text marked [truncated …] is '
     'incomplete: never quote or complete it. Answer with only a JSON '
     'object: {"ranking": [{"k", "score", "rationale", "risks", '
     '"followed_plan", "actual_change"}], "recommended": k or null, '
@@ -792,6 +943,9 @@ String timelineJudgeMessage(TimelineRun run, Map<int, String> diffs) {
     ..writeln(
       'Starting state: ${run.baseState} state of checkpoint ${run.baseCheckpoint}; its label: $label',
     );
+  if (run.brief != null && run.brief!.isNotEmpty) {
+    buffer.writeln('Lessons from earlier attempts: ${run.brief}');
+  }
   for (final t in run.timelines) {
     final test = t.test;
     buffer

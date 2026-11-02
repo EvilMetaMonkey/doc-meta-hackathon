@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:path/path.dart' as p;
 
+import 'abandoned_work.dart';
 import 'cli.dart';
 import 'bisect_store.dart';
 import 'dmc_client.dart';
@@ -29,10 +30,14 @@ class TimelineDeps {
   /// Replaces `--timeout` for the agents (tests use seconds).
   final Duration? agentTimeout;
 
+  /// Replaces `--stall` (tests use a second or two).
+  final Duration? stall;
+
   const TimelineDeps({
     this.interrupts,
     this.statusEvery = const Duration(seconds: 30),
     this.agentTimeout,
+    this.stall,
   });
 }
 
@@ -142,7 +147,7 @@ Future<int> runTimelinesCommand(DocContext context, TimelineDeps deps) async {
 }
 
 const String _usage =
-    'Usage: doc timelines "<task>" --test "<command>" [--from <checkpoint> --state before|after | --from-bisect] [--n 3] [--setup "<command>"] [--link <dir>]... [--max-steps <n>] [--timeout <minutes>] [--agent-model <id>] [--no-judge] [--yes] [--json]\n'
+    'Usage: doc timelines "<task>" --test "<command>" [--from <checkpoint> --state before|after | --from-bisect] [--n 3] [--setup "<command>"] [--link <dir>]... [--max-steps <n>] [--timeout <minutes>] [--stall <seconds>] [--agent-model <id>] [--no-judge] [--yes] [--json]\n'
     '       doc timelines list | show <run-id> | judge <run-id> | pick <run-id> <k> | clean <run-id>';
 
 Future<int> _run(DocContext context, TimelineDeps deps) async {
@@ -172,6 +177,9 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   final n = option('n', 3, 2, 5);
   final maxSteps = option('max-steps', 20, 1, 200);
   final timeoutMinutes = option('timeout', 10, 1, 120);
+  final stall =
+      deps.stall ??
+      Duration(seconds: option('stall', timelineDefaultStallSeconds, 10, 3600));
   if (args['state'] != null &&
       args['state'] != 'before' &&
       args['state'] != 'after') {
@@ -204,8 +212,9 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       .toList();
   var from = args['from'] as String?;
   var state = (args['state'] as String?) ?? 'after';
+  Map<String, Object?>? last;
   if (fromBisect) {
-    final last = loadLastBisect(context.env, fingerprint);
+    last = loadLastBisect(context.env, fingerprint);
     final firstBad = last?['firstBad'];
     if (last == null || firstBad is! Map) {
       throw _Abort(
@@ -255,13 +264,14 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     'show',
     baseId,
   ], workspace: context.workspace);
-  final baseChanged = [
+  final changedFiles = [
     for (final f
         in ((show['data'] as Map?)?['files'] as List? ?? const [])
             .whereType<Map>())
       if (f['change'] != null && f['change'] != 'unchanged')
-        '${f['path']} (${f['change']})',
+        (path: f['path'] as String, change: f['change'] as String),
   ];
+  final baseChanged = [for (final f in changedFiles) '${f.path} (${f.change})'];
 
   // The repository: a Git work tree whose top is dmc's workspace root.
   final top = (await _git(context, root, [
@@ -320,14 +330,43 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   say('Base: $baseDescription: ${baseLabel ?? '(no label)'}');
   say('  ${exportFiles.length} file(s), exported by dmc to $exportDir');
 
-  // 2. Lessons and the plan.
+  // With --from-bisect, the planner gets what bisect found about the base.
+  TimelineBisectFacts? bisectFacts;
+  if (fromBisect) {
+    final firstBad = last!['firstBad'] as Map;
+    bisectFacts = TimelineBisectFacts(
+      label: firstBad['label'] as String? ?? baseLabel,
+      changedFiles: baseChanged,
+      diff: await abandonedDiff(
+        dmc,
+        workspace: context.workspace,
+        checkpointId: baseId,
+        files: changedFiles,
+        note: context.log,
+      ),
+      explanation: last['explanation'] as String?,
+    );
+    say(
+      'Bisect facts for the planner: that turn\'s prompt, its ${changedFiles.length} changed file(s), its diff${bisectFacts.explanation == null ? '' : ' and bisect\'s explanation'}.',
+    );
+  }
+
+  // 2. Lessons and the plan. Candidate files: the task's paths, --files
+  // and, from a chosen checkpoint, the files it changed.
+  final baseFiles = [
+    if (fromBisect || args['from'] != null)
+      for (final f in changedFiles) f.path,
+  ];
   String? brief;
-  final briefResult = await buildBrief(context, task);
-  if (briefResult?.brief != null) {
-    brief = briefResult!.brief;
-    say('Lesson brief (${briefResult.footer}): $brief');
-  } else if (briefResult != null && briefResult.matches.isEmpty) {
-    say('No lessons match this task.');
+  var lessonIds = <String>[];
+  final briefResult = await buildBrief(context, task, extraFiles: baseFiles);
+  if (briefResult != null) {
+    say(lessonMatchSummary(briefResult.matches, briefResult.candidates));
+    if (briefResult.brief != null) {
+      brief = briefResult.brief;
+      lessonIds = [for (final m in briefResult.matches) m.lesson.id];
+      say('Lesson brief (${briefResult.footer}): $brief');
+    }
   }
   final messages = [
     const ChatMessage('system', timelinePlannerSystemPrompt),
@@ -342,6 +381,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
         baseChanged: baseChanged,
         files: exportFiles.toList()..sort(),
         test: testCommand,
+        bisect: bisectFacts,
       ),
     ),
   ];
@@ -433,6 +473,34 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     }
   }
 
+  // The plan's files can match more lessons; the agents and the judge get
+  // the brief for all of them.
+  final planFiles = {for (final a in approaches) ...a.filesLikely};
+  if (briefResult != null && !briefResult.candidates.containsAll(planFiles)) {
+    final matched = await matchTaskLessons(
+      context,
+      task,
+      extraFiles: [...baseFiles, ...planFiles],
+    );
+    final ids = [for (final m in matched.matches) m.lesson.id];
+    if (!ids.every(lessonIds.contains) || ids.length != lessonIds.length) {
+      say('');
+      say(
+        'With the plan\'s files: ${lessonMatchSummary(matched.matches, matched.candidates)}',
+      );
+      final again = await buildBrief(
+        context,
+        task,
+        extraFiles: [...baseFiles, ...planFiles],
+      );
+      if (again?.brief != null) {
+        brief = again!.brief;
+        lessonIds = [for (final m in again.matches) m.lesson.id];
+        say('Lesson brief for the agents (${again.footer}): $brief');
+      }
+    }
+  }
+
   final run = TimelineRun(
     id: runId,
     createdAt: now.toUtc().toIso8601String(),
@@ -449,6 +517,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     baseLabel: baseLabel,
     baseCommit: null,
     brief: brief,
+    lessons: lessonIds,
     planner: planner,
     timelines: [
       for (var k = 1; k <= n; k++)
@@ -508,7 +577,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     );
   }
   final question =
-      'Run $n Muse Code agents${model == null ? '' : ' ($model)'} in separate worktrees (max $maxSteps steps, $timeoutMinutes min each, est. cost $costText)? [y/N] ';
+      'Run $n Muse Code agents${model == null ? '' : ' ($model)'} in separate worktrees (max $maxSteps steps, $timeoutMinutes min each, stopped after ${stall.inSeconds} s without progress, est. cost $costText)? [y/N] ';
   bool agreed;
   if (yes) {
     say('${question}yes (--yes)');
@@ -655,7 +724,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       ?lesson,
       'Approach ${t.k} of $n: ${t.approach.title}\n${t.approach.plan}',
       'Task: $task',
-      'Work only in this folder. When you are done, Doc runs the tests here with: $testCommand',
+      timelineAgentTestLine(testCommand),
     ].join('\n\n');
     final watch = Stopwatch()..start();
     t.status = TimelineStatus.running;
@@ -672,6 +741,9 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
           '--max-model-steps',
           '$maxSteps',
           '--disable-web-tools',
+          // No shell: a command needing approval would wait forever, as
+          // nobody can approve it. Doc runs the tests itself afterwards.
+          '--disable-shell',
           '--json',
           if (agentModel != null && agentModel.isNotEmpty) ...[
             '--model',
@@ -693,6 +765,8 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     processes[t.k] = process;
     if (interrupted) process.kill(ProcessSignal.sigterm);
     final lines = <String>[];
+    final progress = MuseProgress();
+    var lastEvent = watch.elapsed;
     final reading = Future.wait([
       process.stdout
           .transform(const Utf8Decoder(allowMalformed: true))
@@ -700,11 +774,29 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
           .forEach((line) {
             lines.add(line);
             events.writeln(line);
+            progress.add(line);
+            lastEvent = watch.elapsed;
           }),
       process.stderr
           .transform(const Utf8Decoder(allowMalformed: true))
           .forEach(log.write),
     ]);
+    // Stall: no event for [stall]. Stop the agent and say why.
+    String? stalled;
+    final stallCheck = Timer.periodic(
+      stall < const Duration(seconds: 10)
+          ? stall ~/ 4
+          : const Duration(seconds: 2),
+      (_) {
+        if (stalled != null || watch.elapsed - lastEvent < stall) return;
+        stalled = timelineStallReason(progress.awaitingApproval, stall);
+        process!.kill(ProcessSignal.sigterm);
+        Timer(
+          const Duration(seconds: 5),
+          () => process!.kill(ProcessSignal.sigkill),
+        );
+      },
+    );
     var timedOut = false;
     final code = await process.exitCode.timeout(
       deps.agentTimeout ?? Duration(minutes: timeoutMinutes),
@@ -720,6 +812,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
         );
       },
     );
+    stallCheck.cancel();
     await reading.timeout(
       const Duration(seconds: 5),
       onTimeout: () => const [],
@@ -739,6 +832,9 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     if (interrupted) {
       t.status = TimelineStatus.stopped;
       t.reason = 'stopped by Ctrl-C';
+    } else if (stalled != null) {
+      t.status = TimelineStatus.stalled;
+      t.reason = stalled;
     } else if (timedOut) {
       t.status = TimelineStatus.timedOut;
       t.reason = 'no result within $timeoutMinutes min';
@@ -753,6 +849,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
         TimelineStatus.done => 'done',
         TimelineStatus.timedOut => 'timed out',
         TimelineStatus.stopped => 'stopped',
+        TimelineStatus.stalled => 'stopped (stalled)',
         _ => outcome.stepLimit ? 'stopped at the step limit' : 'failed',
       }} after ${clockText(t.seconds)}, ${t.steps} step(s)${t.costUsd == null ? '' : ', \$${t.costUsd!.toStringAsFixed(4)}'}${t.reason == null ? '' : ' (${t.reason})'}',
     );
