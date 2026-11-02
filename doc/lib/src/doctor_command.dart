@@ -11,6 +11,10 @@ import 'talk_command.dart';
 import 'timelines.dart';
 import 'timelines_command.dart';
 
+/// The dmc Doc found, quoted, to start a fix line: never a bare `dmc`,
+/// which on macOS can be Apple's `/usr/bin/dmc`.
+String dmcFixCommand(String executable) => '"$executable"';
+
 /// How long a `--check` call to Modal may take before Doc calls it a cold
 /// start.
 const Duration glimmerColdAfter = Duration(seconds: 30);
@@ -87,7 +91,7 @@ Future<int> runDoctorCommand(DocContext context) async {
       add(
         DoctorLevel.warn,
         'No dmc workspace at ${context.workspace}',
-        'dmc init (in your project\'s Git repository)',
+        '${dmcFixCommand(dmc.executable)} init (in your project\'s Git repository)',
       );
     }
   } on DmcException catch (error) {
@@ -106,7 +110,7 @@ Future<int> runDoctorCommand(DocContext context) async {
         add(
           DoctorLevel.warn,
           'Hooks ($name): not checked (no dmc workspace here; Claude Code hooks are per repository)',
-          'dmc init, then dmc hooks install --agent claude-code --apply',
+          '${dmcFixCommand(dmc.executable)} init, then ${dmcFixCommand(dmc.executable)} hooks install --agent claude-code --apply',
         );
         continue;
       }
@@ -141,14 +145,14 @@ Future<int> runDoctorCommand(DocContext context) async {
         add(
           DoctorLevel.warn,
           'Hooks ($name, $scope): not installed, so its turns are not checkpointed',
-          'dmc hooks install --agent $agent --apply',
+          '${dmcFixCommand(dmc.executable)} hooks install --agent $agent --apply',
         );
       } else {
         add(
           DoctorLevel.warn,
           'Hooks ($name, $scope): ${missing.isEmpty ? '' : 'missing ${missing.join(', ')}'}'
               '${others.isEmpty ? '' : '${missing.isEmpty ? '' : '; '}${others.length} hook(s) from another dmc build'}',
-          'dmc disable --apply, then dmc hooks install --agent $agent --apply',
+          '${dmcFixCommand(dmc.executable)} disable --apply, then ${dmcFixCommand(dmc.executable)} hooks install --agent $agent --apply',
         );
       }
     }

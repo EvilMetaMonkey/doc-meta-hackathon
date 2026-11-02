@@ -51,6 +51,14 @@ It makes no model calls.
     about 2 minutes". A cold start took 91–113 s.
   - Glimmer scales to zero after 5 idle minutes, so warm it again if the lesson step is more than
     5 minutes later.
+- **Check the live microphone** (verified working on Mike's Mac on 2026-11-02):
+  1. Run `doc talk`. The first time, macOS asks to allow the microphone for the terminal app:
+     allow it.
+  2. Press Space, say "What's the status?", and press Space again.
+  3. Check that the partial transcript updates live, then that Doc shows "I heard … → I'll run:
+     doc status. Run it? [y/N]". Answer `y`.
+  4. Run `doc talk` again, press Space, and press Esc mid-recording. It should say "Cancelled.
+     Nothing more was sent.", and the terminal should still echo what you type afterwards.
 
 ## The scripted agent turns (record or pre-run, about 90 s)
 
