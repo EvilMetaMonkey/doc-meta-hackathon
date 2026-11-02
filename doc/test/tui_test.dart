@@ -339,6 +339,20 @@ package:test_api           expect
       }
     });
 
+    test('a long brief wraps inside the question', () {
+      final state = demo()
+        ..question = Question(
+          context: [
+            'Before you start: ${'keep apply_discount taking percents ' * 6}and add bulk_discount.',
+          ],
+          prompt: "Add this to the agent's first prompt? [y/N]",
+          yesNo: true,
+        );
+      final frame = renderTui(state, 120, 36, color: false).join('\n');
+      expect(frame, contains('and add bulk_discount.'));
+      expect(frame, isNot(contains('…  │')));
+    });
+
     test('a question: what will change, then one [y/N] line', () {
       final state = demo()
         ..question = Question(

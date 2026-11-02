@@ -184,6 +184,7 @@ class TuiApp {
 
   /// Keys for a running voice turn (Space/Enter/Esc while recording).
   StreamController<TalkKey>? _talkKeys;
+  _TuiTalkTerminal? _talkTerminal;
 
   TuiApp({
     required this.host,
@@ -305,7 +306,7 @@ class TuiApp {
       _pagerKey(key);
     } else if (state.command != null) {
       _commandKey(key);
-    } else if (_talkKeys != null) {
+    } else if (_talkKeys != null && (_talkTerminal?.waiting ?? false)) {
       final talk = switch (key.kind) {
         KeyKind.space || KeyKind.enter => TalkKey.toggle,
         KeyKind.escape => TalkKey.cancel,
@@ -990,6 +991,8 @@ class TuiApp {
     if (_talkKeys != null || _busy) return;
     final keys = StreamController<TalkKey>();
     _talkKeys = keys;
+    final terminal = _TuiTalkTerminal(keys.stream, alreadyPressed: true);
+    _talkTerminal = terminal;
     state.voice
       ..state = 'recording'
       ..text = '';
@@ -1001,10 +1004,7 @@ class TuiApp {
     final run = await runDocAction(
       'talk',
       ['talk'],
-      voice: VoiceDeps(
-        terminal: _TuiTalkTerminal(keys.stream, alreadyPressed: true),
-        watchInterrupts: false,
-      ),
+      voice: VoiceDeps(terminal: terminal, watchInterrupts: false),
       onLine: (line) {
         final text = line.trim();
         if (text.startsWith('… ')) {
@@ -1026,6 +1026,7 @@ class TuiApp {
       },
     );
     _talkKeys = null;
+    _talkTerminal = null;
     // Not awaited: the talk terminal's reader may be paused, and close()
     // would wait for it forever.
     unawaited(keys.close());
@@ -1354,6 +1355,10 @@ class _TuiTalkTerminal implements TalkTerminal {
   final StreamIterator<TalkKey> _keys;
   bool _first;
 
+  /// Whether the voice turn is waiting for a key now; other keys go to
+  /// the TUI.
+  bool waiting = false;
+
   _TuiTalkTerminal(Stream<TalkKey> keys, {required bool alreadyPressed})
     : _keys = StreamIterator(keys),
       _first = alreadyPressed;
@@ -1373,7 +1378,12 @@ class _TuiTalkTerminal implements TalkTerminal {
       _first = false;
       return TalkKey.toggle;
     }
-    return await _keys.moveNext() ? _keys.current : TalkKey.cancel;
+    waiting = true;
+    try {
+      return await _keys.moveNext() ? _keys.current : TalkKey.cancel;
+    } finally {
+      waiting = false;
+    }
   }
 }
 

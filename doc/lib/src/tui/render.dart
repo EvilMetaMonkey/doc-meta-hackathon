@@ -432,8 +432,25 @@ _Box _questionBox(Question question, int width) {
     ...fitLine(content, inner),
     const Span(' │', Tone.warn),
   ];
-  for (final line in question.context.take(14)) {
-    rows.add(row(diffLineOrPlain(line)));
+  // Context wraps (a brief is one long line); diff-like lines are cut.
+  final contextRows = <Line>[];
+  for (final line in question.context) {
+    final text = shortenIds(line);
+    final pieces =
+        text.startsWith('+') ||
+            text.startsWith('-') ||
+            displayWidth(text) <= inner
+        ? [text]
+        : wrap(text, inner);
+    for (final piece in pieces) {
+      contextRows.add(diffLineOrPlain(piece));
+    }
+  }
+  for (final line
+      in contextRows.length > 16
+          ? contextRows.sublist(contextRows.length - 16)
+          : contextRows) {
+    rows.add(row(line));
   }
   if (question.context.isNotEmpty) rows.add(row(const []));
   if (question.yesNo) {
@@ -495,11 +512,16 @@ void _overlay(List<Line> body, _Box box, int width) {
   final top = max(0, (body.length - box.rows.length) ~/ 2);
   final left = max(0, (width - box.width) ~/ 2);
   for (var i = 0; i < box.rows.length && top + i < body.length; i++) {
+    // Beside the box only the frame's border stays, so nothing half
+    // hidden peeks out.
     final base = fitLine(body[top + i], width);
+    final right = width - left - box.width;
     body[top + i] = [
-      ...sliceLine(base, 0, left),
+      ...sliceLine(base, 0, 1),
+      Span(' ' * max(0, left - 1)),
       ...fitLine(box.rows[i], box.width),
-      ...sliceLine(base, left + box.width, width - left - box.width),
+      Span(' ' * max(0, right - 1)),
+      ...sliceLine(base, width - 1, 1),
     ];
   }
 }

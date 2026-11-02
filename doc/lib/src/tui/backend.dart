@@ -121,7 +121,9 @@ class DocBackend implements TuiBackend {
     environment: context.env,
     out: io.out,
     err: io.out,
-    client: context.router.client,
+    // No shared client: each run gets its own, whose log (retries,
+    // fallbacks, "Waking Muse Glimmer…") goes to the action's log, never to
+    // the screen.
     readLine: io.ask,
     progress: io.progress,
     handOverTerminal: io.handOver,
