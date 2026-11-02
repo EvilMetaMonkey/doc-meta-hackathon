@@ -275,7 +275,7 @@ Future<int> runBisectCommand(DocContext context) async {
         setup = suggested;
       } else {
         context.out.write('Run this setup in each probe? [y/N] ');
-        final answer = (context.readLine() ?? '').trim().toLowerCase();
+        final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
         if (answer == 'y' || answer == 'yes') setup = suggested;
       }
     }
@@ -547,7 +547,7 @@ Future<int> runBisectCommand(DocContext context) async {
     say('Restore to before this turn? [y/N] yes (--yes)');
   } else {
     context.out.write('Restore to before this turn? [y/N] ');
-    final answer = (context.readLine() ?? '').trim().toLowerCase();
+    final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
     if (answer != 'y' && answer != 'yes') {
       say('Not restored. You can run: doc restore ${bad.id}');
       return 0;

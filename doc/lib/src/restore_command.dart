@@ -119,7 +119,7 @@ Future<int> restoreCheckpoint(DocContext context, String id) async {
     return 0;
   }
 
-  if (!_ask(
+  if (!await _ask(
     context,
     'Restore these files? [y/N] ',
     yes: yes,
@@ -158,7 +158,7 @@ Future<int> restoreCheckpoint(DocContext context, String id) async {
   );
 
   if (context.args['no-lesson'] as bool) return 0;
-  if (!_ask(
+  if (!await _ask(
     context,
     'Draft a lesson from the work you just undid? [Y/n] ',
     yes: yes,
@@ -171,7 +171,7 @@ Future<int> restoreCheckpoint(DocContext context, String id) async {
   var note = context.args['note'] as String?;
   if (note == null && !yes) {
     out.write('What went wrong? (optional, press Enter to skip) ');
-    final answer = context.readLine()?.trim();
+    final answer = (await context.readLine())?.trim();
     if (answer != null && answer.isNotEmpty) note = answer;
   }
   // The restore itself succeeded: a failed draft is reported on stderr and
@@ -189,18 +189,18 @@ String describeRestoreAction(Map action) {
   return 'put back the version from before the turn';
 }
 
-bool _ask(
+Future<bool> _ask(
   DocContext context,
   String question, {
   required bool yes,
   required bool byDefault,
-}) {
+}) async {
   if (yes) {
     context.out.writeln('$question${'yes (--yes)'}');
     return true;
   }
   context.out.write(question);
-  final answer = (context.readLine() ?? '').trim().toLowerCase();
+  final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
   if (answer.isEmpty) return byDefault;
   return answer == 'y' || answer == 'yes';
 }

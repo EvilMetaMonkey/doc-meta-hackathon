@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -158,7 +159,7 @@ Future<int> runDoc(
   StringSink? out,
   StringSink? err,
   ChatClient? client,
-  String? Function()? readLine,
+  FutureOr<String?> Function()? readLine,
   VoiceDeps? voice,
   TimelineDeps? timelines,
 }) async {
@@ -216,7 +217,8 @@ Future<int> runDoc(
     router: router,
     out: stdoutSink,
     log: log,
-    readLine: readLine ?? () => stdin.readLineSync(),
+    readLine: () async =>
+        readLine == null ? stdin.readLineSync() : await readLine(),
     runSubcommand: (subArguments) => runDoc(
       subArguments,
       environment: env,
@@ -278,8 +280,9 @@ class DocContext {
   final StringSink out;
   final void Function(String message) log;
 
-  /// Reads one line of the user's answer (for `doc start`'s question).
-  final String? Function() readLine;
+  /// Reads one line of the user's answer. Async, so the TUI can answer
+  /// from its own key stream.
+  final Future<String?> Function() readLine;
 
   /// Runs another Doc command in-process with the same environment, output
   /// and providers (for `doc talk`).

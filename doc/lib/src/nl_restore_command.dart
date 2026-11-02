@@ -39,21 +39,21 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
   }
   // In --json mode stdout holds only the result; the rest goes to stderr.
   void say(String line) => json ? context.log(line) : context.out.writeln(line);
-  String? ask(String question) {
+  Future<String?> ask(String question) async {
     if (json) {
       context.log(question.trimRight());
     } else {
       context.out.write(question);
     }
-    return context.readLine();
+    return await context.readLine();
   }
 
-  bool confirm(String question, {required bool byDefault}) {
+  Future<bool> confirm(String question, {required bool byDefault}) async {
     if (yes) {
       say('${question}yes (--yes)');
       return true;
     }
-    final answer = (ask(question) ?? '').trim().toLowerCase();
+    final answer = ((await ask(question)) ?? '').trim().toLowerCase();
     if (answer.isEmpty) return byDefault;
     return answer == 'y' || answer == 'yes';
   }
@@ -241,9 +241,9 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
       say('     files: ${c.fileList}');
     }
     final answer =
-        (ask(
+        ((await ask(
                   'Pick 1-${choices.length} to ${plan.mode == NlRestoreMode.goBackBefore ? 'go back to before it' : 'undo only that turn'}, or press Enter to cancel: ',
-                ) ??
+                )) ??
                 '')
             .trim();
     final picked = int.tryParse(answer);
@@ -395,7 +395,7 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
   }
 
   // 5. One confirmation, then dmc's journaled restore, step by step.
-  if (!confirm(
+  if (!await confirm(
     'Apply this restore (${steps.length} step(s), ${changing.length} file(s))? [y/N] ',
     byDefault: false,
   )) {
@@ -447,9 +447,10 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
     );
     final putBack = <Map<String, Object?>>[];
     if (applied.isNotEmpty) {
-      final answer = (ask('Put back the steps already applied? [y/N] ') ?? '')
-          .trim()
-          .toLowerCase();
+      final answer =
+          ((await ask('Put back the steps already applied? [y/N] ')) ?? '')
+              .trim()
+              .toLowerCase();
       if (answer == 'y' || answer == 'yes') {
         for (final done in applied.reversed) {
           final redo = await dmc.runJson([
@@ -497,7 +498,7 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
     return finish(0, 'applied', {'applied': appliedJson});
   }
   final oldest = plan.oldestStep!;
-  if (!confirm(
+  if (!await confirm(
     'Draft a lesson from the work you just undid? [Y/n] ',
     byDefault: true,
   )) {
@@ -506,9 +507,9 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
   }
   var note = args['note'] as String?;
   if (note == null && !yes) {
-    final answer = ask(
+    final answer = (await ask(
       'What went wrong? (optional, press Enter to skip) ',
-    )?.trim();
+    ))?.trim();
     if (answer != null && answer.isNotEmpty) note = answer;
   }
   final later = steps.take(steps.length - 1).toList();

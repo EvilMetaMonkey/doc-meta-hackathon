@@ -588,7 +588,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     } else {
       context.out.write(question);
     }
-    final answer = (context.readLine() ?? '').trim().toLowerCase();
+    final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
     agreed = answer == 'y' || answer == 'yes';
   }
   if (!agreed) {
@@ -1168,7 +1168,7 @@ Future<int> _clean(DocContext context) async {
     context.out.writeln('${question}yes (--yes)');
   } else {
     context.out.write(question);
-    final answer = (context.readLine() ?? '').trim().toLowerCase();
+    final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
     if (answer != 'y' && answer != 'yes') {
       context.out.writeln('Nothing was removed.');
       return 0;

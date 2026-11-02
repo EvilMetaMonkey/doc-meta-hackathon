@@ -524,7 +524,7 @@ Future<int> runTalkCommand(DocContext context, VoiceDeps deps) async {
     var test = await _bisectTest(context);
     if (test == null) {
       out.write('Test command for bisect (Enter to cancel): ');
-      test = context.readLine()?.trim();
+      test = (await context.readLine())?.trim();
       if (test == null || test.isEmpty) {
         out.writeln('Cancelled. Nothing ran.');
         return 0;
@@ -546,7 +546,7 @@ Future<int> runTalkCommand(DocContext context, VoiceDeps deps) async {
     agreed = true;
   } else {
     out.write(question);
-    final answer = (context.readLine() ?? '').trim().toLowerCase();
+    final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
     agreed = answer == 'y' || answer == 'yes';
   }
   if (!agreed) {

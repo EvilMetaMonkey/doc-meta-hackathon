@@ -749,7 +749,7 @@ Future<int> runStartCommand(DocContext context) async {
       context.out.writeln('${question}yes (--yes)');
     } else {
       context.out.write(question);
-      final answer = (context.readLine() ?? '').trim().toLowerCase();
+      final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
       if (answer != 'y' && answer != 'yes') {
         context.out.writeln('Nothing was started.');
         return 0;
@@ -767,7 +767,7 @@ Future<int> runStartCommand(DocContext context) async {
       context.out.writeln('Adding the brief to the first prompt (--yes).');
     } else {
       context.out.write("Add this to the agent's first prompt? [y/N] ");
-      final answer = (context.readLine() ?? '').trim().toLowerCase();
+      final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
       accepted = answer == 'y' || answer == 'yes';
     }
   }
