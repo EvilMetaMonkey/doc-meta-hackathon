@@ -42,6 +42,12 @@ abstract class TalkTerminal {
   Future<TalkKey> readKey();
 }
 
+/// One byte from stdin, for [StdinTalkTerminal.readKey]'s helper isolate.
+/// Top-level and capturing nothing: a closure over this isolate's `stdin`
+/// would try to send the Stdin object, which cannot cross isolates. The
+/// helper's own `stdin` is the same fd 0, and raw mode is process-wide.
+int _readStdinByte() => stdin.readByteSync();
+
 /// The real terminal. Keys are read with `readByteSync` in a helper
 /// isolate, so the stdin stream is never listened to and later questions
 /// can still use `stdin.readLineSync`. A pending read is always drained
@@ -79,7 +85,14 @@ class StdinTalkTerminal implements TalkTerminal {
 
   @override
   Future<TalkKey> readKey() async {
-    final byte = await Isolate.run(stdin.readByteSync);
+    final int byte;
+    try {
+      byte = await Isolate.run(_readStdinByte);
+    } on Object {
+      // stdin is unreadable (the terminal went away): treat it as Esc, so
+      // a read pending during a recording never becomes an uncaught error.
+      return TalkKey.cancel;
+    }
     return byte < 0 ? TalkKey.cancel : talkKeyFor(byte);
   }
 }
@@ -382,7 +395,8 @@ Future<int> runTalkCommand(DocContext context, VoiceDeps deps) async {
       onPartial: partial,
       keywords: keywords,
     );
-    if (live) stdout.writeln();
+    // End the partial-transcript line, if anything was recorded.
+    if (live && (outcome == null || outcome.recorded)) stdout.writeln();
     if (outcome == null) return 130;
     if (outcome.error != null) {
       context.log(outcome.error!);
@@ -391,7 +405,8 @@ Future<int> runTalkCommand(DocContext context, VoiceDeps deps) async {
     result = outcome.result!;
     source = 'the microphone (${outcome.tool})';
     if (result.cancelled) {
-      out.writeln('Cancelled. Nothing more was sent.');
+      // Esc before talking already said "Nothing was recorded or sent."
+      if (outcome.recorded) out.writeln('Cancelled. Nothing more was sent.');
       _recordUsage(context, provider, route.model, result);
       return 0;
     }
@@ -559,6 +574,9 @@ class _TurnOutcome {
   final String tool;
 
   const _TurnOutcome(this.tool, {this.result, this.error});
+
+  /// False when the turn ended before the microphone started.
+  bool get recorded => tool != 'none';
 }
 
 /// One push-to-talk turn from the microphone. Returns null after Ctrl-C.

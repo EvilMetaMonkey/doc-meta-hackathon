@@ -433,6 +433,7 @@ void main() {
     final unused = FakeRecorder();
     expect(await doc(['talk'], terminal: idle, recorder: unused), 0);
     expect('$out', contains('Cancelled. Nothing was recorded or sent.'));
+    expect('$out', isNot(contains('Nothing more was sent')));
     expect(unused.started, 0);
     expect(voice.sessions, 0);
     expect(idle.inRaw, isFalse);

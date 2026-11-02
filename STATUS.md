@@ -3,7 +3,7 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-11-01 by Claude (README session)
+Last updated: 2026-11-02 by Claude (doc talk stdin fix)
 
 **Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
 work only. dmc lives in its own repository and is set up in `.deps/dmc` by
@@ -15,6 +15,23 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 ## Done
 
+- **`doc talk` live mode fixed** (branch `fix-talk-stdin`). In a real terminal it crashed at the
+  first key: `Isolate.run(stdin.readByteSync)` sent the Stdin object to the helper isolate
+  ("object is unsendable … Class: Stdin"). It now reads through a top-level `_readStdinByte` that
+  captures nothing, and an unreadable stdin counts as Esc instead of becoming an uncaught error
+  in the read left pending during a recording. There were no other `Isolate`/`SendPort` uses in
+  `doc/`. Esc before talking no longer also prints "Cancelled. Nothing more was sent."
+  - **Regression test:** `test/talk_terminal_test.dart` runs the real `StdinTalkTerminal` in a
+    `dart run` subprocess (`test/support/read_talk_keys.dart`) with stdin as a pipe: Enter, Space,
+    Esc, keys one at a time, end of input, and a `readLineSync` afterwards. It fails on the old
+    line with the same error.
+  - **Real terminal (a pty on the Mac, a fake `rec` playing silence or `say` speech):** Esc at
+    the prompt, Ctrl-C at the prompt (exit 130), Esc and Ctrl-C while recording, a full turn of
+    silence ("I heard nothing"), and a spoken "Summarize the latest checkpoint" routed to
+    `doc summarize <id>` and answered "n" at "Run it? [y/N]". Each time the terminal came back
+    with `icanon echo` and no `rec` was left running. Meta audio: about 10 s ($0.0005).
+  - **Gates:** a clean `setup_dmc` (35/35); dmc analyzer clean, 234 tests, 3 contract tests; Doc
+    analyzer clean, 190 tests.
 - **Polish session** (branch `polish`).
   - **Cowork's review fixes:**
     - `make_demo_repo.dart`: `--help`/`-h`; unknown options are errors; a non-empty target, or
@@ -685,9 +702,11 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
   is a heuristic: the transcript has been idle for the stale age, or none was found.
 - Contributor-mode Spark agents are cheap but weaker: in the rehearsal one hit a Meta
   `server_error`, and Doc reported it as a failed timeline.
-- **Voice, not yet verified with a person:** no live `doc talk` with the microphone was run (this
-  session had no interactive terminal and nobody spoke), so the macOS microphone permission
-  prompt, the raw-mode key handling and the live partial line are tested with fakes only. The
+- **Voice, not yet verified with a person:** no live `doc talk` with the microphone was run (no
+  microphone in these sessions), so the macOS microphone permission prompt and ffmpeg's
+  AVFoundation capture are untested. The raw-mode keys, the live partial line, Esc, Ctrl-C and
+  the terminal restore were run in a pty with a fake `rec` on 2026-11-02 (it crashed at the first
+  key before that fix). The
   real transcription was verified with `--file` on synthetic speech (`say`). SoX is not installed
   on the Mac, so the mic path is ffmpeg/AVFoundation (`:0`, MacBook Pro Microphone). On Linux and
   Windows only `rec` is used for the mic. Ctrl-C in raw mode relies on the terminal still
@@ -731,6 +750,10 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
 
+- 2026-11-02 · Claude · `doc talk` stdin fix (branch `fix-talk-stdin`): the live key read no
+  longer sends Stdin to an isolate; a real-terminal regression test; a pty walk-through of the
+  live path with a fake `rec`; the double "Cancelled" line removed. Left for Mike: a live run at
+  the microphone (permission prompt, ffmpeg capture, a real voice).
 - 2026-11-01 · Claude · README (branch `readme`): new top section (title, tagline, demo-link
   placeholder, find/fix/remember, pre-existing work); setup and "try it" steps use `"$DMC_BIN"`
   (PowerShell form given once) and a `doc` alias (with a PowerShell function). Followed the edited
