@@ -3,7 +3,7 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-11-02 by Claude (doc talk stdin fix)
+Last updated: 2026-11-02 by Claude (step 1: demo fixes)
 
 **Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
 work only. dmc lives in its own repository and is set up in `.deps/dmc` by
@@ -15,6 +15,47 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 
 ## Done
 
+- **Step 1: demo fixes** (branch `demo-fixes`), from Mike's run on a real Flutter project
+  (`Explain_This_Bill_2`, 2026-11-01). dmc is unchanged.
+  - **Timelines agents without a shell.** The Nov 1 logs (`tl-20261101-190536-f068`, `…-190152-ce9c`)
+    confirmed the cause: the last event of the two hung agents was `task.lifecycle.proposed` with
+    `task_kind: "tool.bash"`, never accepted. `muse exec` now gets `--disable-shell`, and the prompt
+    says the agent cannot run commands. The planner is told so too.
+    - `--stall <seconds>` (default 90): no new event → stopped as `stalled`, with "waiting for
+      approval to run a shell command (Doc runs agents without a shell)" or "no progress for 90 s".
+    - Steps of a stopped/timed-out agent are counted from `model.meta.response` proposals, which
+      equal `run.usage.calls` in all 7 completed runs checked. The hung Nov 1 agents had 11 and 14
+      steps, not 0.
+  - **Bisect-aware planning:** with `--from-bisect` the planner gets the bad turn's prompt, files,
+    diff (`abandonedDiff`) and bisect's explanation (`doc bisect` now saves it). It is told to
+    prefer the smallest change and may plan a revert.
+  - **Lessons in timelines:** candidates are the task's paths, `--files`, the base turn's files
+    (with `--from`/`--from-bisect`) and the plan's files. The brief reaches the planner, agents and
+    judge. The run saves the lesson ids.
+  - **Restore picks by number:** `"pick"`/`"alternatives"` are list numbers (strict schema), and
+    the list shows no ids. Doc's file cross-check makes the user pick when the request names files
+    the picked turn does not touch but another turn does. The reading starts with "Turn N of M ·
+    agent · label · files: …". `--json` adds `pick` and keeps `checkpointId`.
+  - **`doc start`** asks when no lesson matched (naming the files) and lists drafts that would
+    match. **`doc lesson approve`** gives each refusal with its fix. **`doc doctor`** fix lines use
+    the quoted dmc path. **`doc talk`** logs a key read error once. The **RUNBOOK** has the live
+    microphone check.
+  - **Real run on the Mac** (`/tmp/doc-step1` from `make_demo_repo --yes`, the four RUNBOOK
+    turns, `doc bisect`, then `doc timelines "fix the failing tests without changing the tests"
+    --from-bisect --agent-model muse-spark-1.3-contributor --max-steps 15 --yes`):
+    - bisect found the Muse fraction turn in 2 s;
+    - Wonder planned "1. Fully revert to percent API", "2. Support both percent and fraction
+      inputs" and "3. Percent façade over fraction helper";
+    - timeline 1: done, 6 steps, 0:34, money.py +5 −5, PASS;
+    - timeline 2: done, 6 steps, 0:41, money.py +10 −3, PASS;
+    - timeline 3: done, 9 steps, 1:19, checkout.py and money.py, +10 −3, PASS;
+    - none stalled, and no agent proposed a shell command;
+    - Wonder recommended timeline 1 (the revert, 10/10);
+    - costs: Muse Code $0.0115, planner $0.0372, judge $0.0236; 109 s for the whole command.
+    - Cleaned up afterwards: `dmc disable --apply`, Muse settings back to `88778f4f90219b5b`,
+      worktrees, run, bisect record and `/tmp/doc-step1` removed.
+  - **Gates:** a clean `setup_dmc` (35/35); dmc analyzer clean, 234 tests, 3 contract tests; Doc
+    analyzer clean, 207 tests.
 - **`doc talk` live mode fixed** (branch `fix-talk-stdin`). In a real terminal it crashed at the
   first key: `Isolate.run(stdin.readByteSync)` sent the Stdin object to the helper isolate
   ("object is unsendable … Class: Stdin"). It now reads through a top-level `_readStdinByte` that
@@ -696,17 +737,18 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
   costs, it does not budget them. `pick`'s `git merge` option also brings the "timeline base"
   commit; the patch option moves only the timeline's change. Timelines need the dmc workspace to
   be the Git top level. The timelines CLI tests run on Windows CI, but Muse Code on Windows
-  is not verified.
+  is not verified. Since 2026-11-02 the agents have no shell (`--disable-shell`), so they cannot
+  check their own work; Doc's test run decides. The stall check (90 s without an event) could
+  stop an agent in one very long model call; raise `--stall` if that happens.
 - `dmc disable` removes user-scope hooks too, which serve every dmc workspace on the machine (the
   preview says so). Re-enable with `dmc hooks install`. The doctor's "session looks ended" check
   is a heuristic: the transcript has been idle for the stale age, or none was found.
 - Contributor-mode Spark agents are cheap but weaker: in the rehearsal one hit a Meta
   `server_error`, and Doc reported it as a failed timeline.
-- **Voice, not yet verified with a person:** no live `doc talk` with the microphone was run (no
-  microphone in these sessions), so the macOS microphone permission prompt and ffmpeg's
-  AVFoundation capture are untested. The raw-mode keys, the live partial line, Esc, Ctrl-C and
-  the terminal restore were run in a pty with a fake `rec` on 2026-11-02 (it crashed at the first
-  key before that fix). The
+- **Voice:** Mike verified the live `doc talk` at the microphone on his Mac on 2026-11-02
+  (permission prompt, "What's the status?" → `doc status`, Esc mid-recording; the RUNBOOK has
+  the check). Before that, the raw-mode keys, the live partial line, Esc, Ctrl-C and the terminal
+  restore were run in a pty with a fake `rec` (it crashed at the first key before that fix). The
   real transcription was verified with `--file` on synthetic speech (`say`). SoX is not installed
   on the Mac, so the mic path is ffmpeg/AVFoundation (`:0`, MacBook Pro Microphone). On Linux and
   Windows only `rec` is used for the mic. Ctrl-C in raw mode relies on the terminal still
@@ -750,6 +792,11 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
 
+- 2026-11-02 · Claude · Step 1 demo fixes (branch `demo-fixes`): timelines without a shell, stall
+  detection and step counts from events; bisect-aware planning and lessons on base/plan files;
+  restore picks by list number with a file cross-check; `doc start` asks on no match; approve,
+  doctor and talk messages; RUNBOOK mic check. Real timelines run: 3/3 done and passing, the
+  revert recommended. Doc 207 tests.
 - 2026-11-02 · Claude · `doc talk` stdin fix (branch `fix-talk-stdin`): the live key read no
   longer sends Stdin to an isolate; a real-terminal regression test; a pty walk-through of the
   live path with a fake `rec`; the double "Cancelled" line removed. Left for Mike: a live run at

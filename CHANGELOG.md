@@ -3,6 +3,33 @@
 Event work only (Meta AI Developer Hackathon 2026, from 2026-10-26). Changes to dmc are listed
 by patch in [PATCHES.md](PATCHES.md).
 
+## 2026-11-02: demo fixes (found on a real Flutter project)
+
+- **Timelines agents have no shell.** `muse exec` runs with `--disable-shell`, and the prompt
+  says "You cannot run commands. Doc runs the tests here after you finish with: …". Before,
+  an agent that proposed a shell command waited for an approval nobody could give, until the
+  timeout.
+  - `--stall <seconds>` (default 90): an agent with no new event for that long is stopped as
+    `stalled`. The reason says "waiting for approval to run a shell command (Doc runs agents
+    without a shell)" when that is what it was doing, else "no progress for 90 s".
+  - A stopped or timed-out agent reports the steps it took (counted from Muse Code's
+    `model.meta.response` events), not 0.
+- **Bisect-aware planning.** With `--from-bisect`, Wonder gets the bad turn's prompt, changed
+  files, diff and bisect's explanation (now saved by `doc bisect`), prefers the smallest change,
+  and may plan a revert or partial revert.
+- **Lessons in timelines.** They match on the task's paths, `--files`, the base turn's files and
+  the plan's files. The brief goes to the planner, the agents and the judge, which flags a
+  timeline that goes against a lesson. Doc prints which lessons matched.
+- **Natural-language restore picks by number.** The model answers `"pick": <list number>`, and
+  Doc maps it to the id. When the request names files the picked turn does not touch but another
+  turn does, Doc asks the user to pick. The reading starts with "Turn 3 of 6 · agent · label ·
+  files: …". `--json` keeps `checkpointId` and adds `pick`.
+- **`doc start` asks when no lesson matched**, names the files it checked, and lists drafts that
+  would match if approved.
+- `doc lesson approve` says how to fix each refusal. `doc doctor`'s fix lines name the dmc it
+  found, quoted. `doc talk` logs a key read error once. The runbook has the live microphone
+  check.
+
 ## 2026-11-02: `doc talk` live mode fix
 
 - `doc talk` no longer crashes at the first key in a real terminal ("object is unsendable …
