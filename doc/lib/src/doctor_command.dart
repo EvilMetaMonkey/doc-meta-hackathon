@@ -42,20 +42,42 @@ class DoctorLine {
 /// not ok says how to fix it. Exit 1 when anything failed.
 Future<int> runDoctorCommand(DocContext context) async {
   final check = context.args['check'] as bool;
-  final env = context.env;
   final out = context.out;
-  final lines = <DoctorLine>[];
-  void add(DoctorLevel level, String text, [String? fix]) {
-    final line = DoctorLine(level, text, fix);
-    lines.add(line);
-    _print(out, line);
-  }
-
   out.writeln(
     check
         ? 'Doc doctor (--check: one tiny prompt to each provider in use)'
         : 'Doc doctor (no model calls; add --check to call each provider)',
   );
+  final lines = await doctorChecks(
+    context,
+    check: check,
+    onLine: (line) => _print(out, line),
+    say: out.writeln,
+  );
+  final failures = lines.where((l) => l.level == DoctorLevel.fail).length;
+  final warnings = lines.where((l) => l.level == DoctorLevel.warn).length;
+  out.writeln(
+    '${lines.length - failures - warnings} ok, $warnings warning(s), $failures failure(s).',
+  );
+  return failures > 0 ? 1 : 0;
+}
+
+/// The doctor's checks as data, each line reported to [onLine] as it is
+/// found (the TUI header uses them; `doc doctor` prints them). [say] gets
+/// the few progress lines `--check` prints. No model call unless [check].
+Future<List<DoctorLine>> doctorChecks(
+  DocContext context, {
+  bool check = false,
+  void Function(DoctorLine line)? onLine,
+  void Function(String line)? say,
+}) async {
+  final env = context.env;
+  final lines = <DoctorLine>[];
+  void add(DoctorLevel level, String text, [String? fix]) {
+    final line = DoctorLine(level, text, fix);
+    lines.add(line);
+    onLine?.call(line);
+  }
 
   // dmc.
   DmcClient? dmc;
@@ -220,7 +242,7 @@ Future<int> runDoctorCommand(DocContext context) async {
     for (final entry in probes.entries) {
       final provider = context.config.providers[entry.key]!;
       if (provider.billing == ProviderBilling.gpuTime) {
-        out.writeln(
+        say?.call(
           '        … asking Muse Glimmer on Modal: if Glimmer is cold, the first call takes about 2 minutes',
         );
       }
@@ -306,12 +328,7 @@ Future<int> runDoctorCommand(DocContext context) async {
     add(DoctorLevel.ok, 'Claude Code: ${await _version(claude) ?? claude}');
   }
 
-  final failures = lines.where((l) => l.level == DoctorLevel.fail).length;
-  final warnings = lines.where((l) => l.level == DoctorLevel.warn).length;
-  out.writeln(
-    '${lines.length - failures - warnings} ok, $warnings warning(s), $failures failure(s).',
-  );
-  return failures > 0 ? 1 : 0;
+  return lines;
 }
 
 void _print(StringSink out, DoctorLine line) {

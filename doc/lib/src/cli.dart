@@ -16,6 +16,7 @@ import 'model_router.dart';
 import 'summarize.dart';
 import 'talk_command.dart';
 import 'timelines_command.dart';
+import 'tui/ui_command.dart';
 import 'usage.dart';
 
 /// Room for reasoning plus a 2-3 sentence answer.
@@ -35,6 +36,10 @@ Commands:
   summarize <checkpoint-id>        Summarize a checkpoint in plain English.
   usage                            Tokens, audio seconds and estimated cost per
                                    provider.
+  ui [--color auto|always|never] [--no-splash]
+                                   The full-screen Doc (also plain `doc` in a
+                                   terminal): turns, summaries, Space to talk,
+                                   bisect, restore, lessons; : runs any command.
   status                           The latest checkpoints, from dmc's JSON.
   doctor [--check]                 Is everything set up? dmc, hooks, keys (never
                                    values) and roles, Modal, the microphone tool
@@ -149,6 +154,8 @@ ArgParser _parser() => ArgParser()
   ..addOption('stall')
   ..addOption('limit')
   ..addFlag('diff', negatable: false)
+  ..addOption('color')
+  ..addFlag('no-splash', negatable: false)
   ..addFlag('help', abbr: 'h', negatable: false);
 
 /// Run Doc. Output goes to [out], diagnostics (retries, fallbacks, errors)
@@ -162,6 +169,8 @@ Future<int> runDoc(
   FutureOr<String?> Function()? readLine,
   VoiceDeps? voice,
   TimelineDeps? timelines,
+  void Function(Map<String, Object?> event)? progress,
+  Future<int> Function(Future<int> Function() run)? handOverTerminal,
 }) async {
   final env = environment ?? Platform.environment;
   final stdoutSink = out ?? stdout;
@@ -175,10 +184,13 @@ Future<int> runDoc(
     stderrSink.writeln('[doc] ${error.message}\n\n$docUsage');
     return 2;
   }
-  if (args['help'] as bool || args.rest.isEmpty) {
+  // `doc` alone in an interactive terminal opens the TUI.
+  final interactive = out == null && stdin.hasTerminal && stdout.hasTerminal;
+  if (args['help'] as bool || (args.rest.isEmpty && !interactive)) {
     stdoutSink.write(docUsage);
     return args.rest.isEmpty && !(args['help'] as bool) ? 2 : 0;
   }
+  final command = args.rest.isEmpty ? 'ui' : args.rest.first;
 
   final configDir = docConfigDirectory(env);
   final configFile = File(p.join(configDir, 'config.json'));
@@ -219,6 +231,8 @@ Future<int> runDoc(
     log: log,
     readLine: () async =>
         readLine == null ? stdin.readLineSync() : await readLine(),
+    progress: progress,
+    handOverTerminal: handOverTerminal,
     runSubcommand: (subArguments) => runDoc(
       subArguments,
       environment: env,
@@ -228,11 +242,15 @@ Future<int> runDoc(
       readLine: readLine,
       voice: voice,
       timelines: timelines,
+      progress: progress,
+      handOverTerminal: handOverTerminal,
     ),
   );
 
   try {
-    switch (args.rest.first) {
+    switch (command) {
+      case 'ui':
+        return await runUiCommand(context);
       case 'models':
         return await _models(context);
       case 'summarize':
@@ -288,6 +306,19 @@ class DocContext {
   /// and providers (for `doc talk`).
   final Future<int> Function(List<String> arguments)? runSubcommand;
 
+  /// Structured progress for a UI (for example one event per bisect probe).
+  /// Printed output is unchanged; nothing is sent when null.
+  final void Function(Map<String, Object?> event)? progress;
+
+  /// Wraps a child process that needs the real terminal (an agent from
+  /// `doc start`, the editor from `doc lesson edit`), so a full-screen UI
+  /// can give it up and take it back. Null: run directly.
+  final Future<int> Function(Future<int> Function() run)? handOverTerminal;
+
+  /// Runs [run] with the terminal handed over (see [handOverTerminal]).
+  Future<int> withTerminal(Future<int> Function() run) =>
+      handOverTerminal == null ? run() : handOverTerminal!(run);
+
   const DocContext({
     required this.args,
     required this.env,
@@ -298,6 +329,8 @@ class DocContext {
     required this.log,
     required this.readLine,
     this.runSubcommand,
+    this.progress,
+    this.handOverTerminal,
   });
 
   /// The dmc workspace Doc works on: `--workspace`, else the current dir.

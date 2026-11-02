@@ -77,6 +77,10 @@ String _errors(Map<String, Object?> envelope) =>
         .map((error) => '${error['code']}: ${error['message']}')
         .join('; ');
 
+/// This workspace's lesson store (for the UI's lessons pane).
+Future<LessonStore> lessonStoreFor(DocContext context) async =>
+    _store(context, await _workspace(context));
+
 LessonStore _store(DocContext context, _Workspace workspace) =>
     LessonStore.forWorkspace(
       dataDirectory: docDataDirectory(context.env),
@@ -432,11 +436,13 @@ Future<int> _edit(DocContext context) async {
   final editor = (context.env['VISUAL'] ?? context.env['EDITOR'] ?? 'vi')
       .trim();
   final parts = editor.split(RegExp(r'\s+'));
-  final process = await Process.start(parts.first, [
-    ...parts.skip(1),
-    file.path,
-  ], mode: ProcessStartMode.inheritStdio);
-  final code = await process.exitCode;
+  final code = await context.withTerminal(() async {
+    final process = await Process.start(parts.first, [
+      ...parts.skip(1),
+      file.path,
+    ], mode: ProcessStartMode.inheritStdio);
+    return process.exitCode;
+  });
   try {
     final problems = Lesson.parse(file.readAsStringSync()).problems();
     if (problems.isNotEmpty) {
@@ -784,13 +790,15 @@ Future<int> runStartCommand(DocContext context) async {
     // Both agents take the first prompt as their only argument in
     // interactive mode: `muse "<prompt>"`, `claude "<prompt>"`. Their own
     // hooks create the checkpoints.
-    final process = await Process.start(
-      binary,
-      [prompt],
-      workingDirectory: context.workspace,
-      mode: ProcessStartMode.inheritStdio,
-    );
-    return await process.exitCode;
+    return await context.withTerminal(() async {
+      final process = await Process.start(
+        binary,
+        [prompt],
+        workingDirectory: context.workspace,
+        mode: ProcessStartMode.inheritStdio,
+      );
+      return process.exitCode;
+    });
   } on ProcessException catch (error) {
     context.log('Could not start $binary: ${error.message}');
     return 1;
