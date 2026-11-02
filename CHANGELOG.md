@@ -3,6 +3,25 @@
 Event work only (Meta AI Developer Hackathon 2026, from 2026-10-26). Changes to dmc are listed
 by patch in [PATCHES.md](PATCHES.md).
 
+## 2026-11-03: the Doc TUI (`doc ui`) and the dmc splash cleanup
+
+- **`doc ui`** (or plain `doc` in a terminal) opens Doc full screen. It shows the answer, not the
+  process:
+  - the turns newest first (● ok, ✗ the turn that broke the tests, ↺ undone, ○ open);
+  - for the selected one, a plain-English summary (cached), its files with +/− counts and the
+    start of the diff;
+  - `d` for details, `o` for the raw log of each action.
+- **Keys:** Space talks to Doc anywhere; `r` restore, `/` restore by words, `u` redo, `b` bisect
+  (a strip that fills in as probes finish, then the bad turn, the failing test's lines and the
+  explanation), `l` lessons, `a` start an agent, `t` timelines; `:` runs any `doc …` command or
+  a read-only `dmc …` one; `?` lists every key. `--color auto|always|never`, `--no-splash`.
+- **The same code paths:** every action runs the CLI command in-process. Its questions are the
+  TUI's dialog (`DocContext.readLine` is now async), and the agent and the editor get the real
+  terminal and give it back.
+- `doc bisect` suggests `flutter pub get` for Flutter projects.
+- **dmc (patch 0036):** the splash car is symmetrical, the header is `DMC <version>`, the status
+  row shows the host name, and no film or carmaker names remain.
+
 ## 2026-11-02: demo fixes (found on a real Flutter project)
 
 - **Timelines agents have no shell.** `muse exec` runs with `--disable-shell`, and the prompt
