@@ -42,7 +42,7 @@ Commands:
                                    per provider; wakes Glimmer).
   timelines "<task>" --test "<command>" [--from <cp> --state before|after]
          [--n 3] [--setup "<command>"] [--link <dir>]... [--max-steps <n>]
-         [--timeout <minutes>] [--yes] [--json]
+         [--timeout <minutes>] [--stall <seconds>] [--yes] [--json]
                                    Parallel timelines: Muse Wonder plans N
                                    different approaches, N Muse Code agents
                                    try them in separate Git worktrees outside
@@ -145,6 +145,7 @@ ArgParser _parser() => ArgParser()
   ..addOption('n')
   ..addOption('state')
   ..addOption('max-steps')
+  ..addOption('stall')
   ..addOption('limit')
   ..addFlag('diff', negatable: false)
   ..addFlag('help', abbr: 'h', negatable: false);

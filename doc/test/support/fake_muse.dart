@@ -6,7 +6,11 @@ import 'dart:io';
 /// - FAKE-FIX: writes "good" to state.txt, finishes in 3 steps;
 /// - FAKE-WRONG: adds notes.txt and leaves state.txt alone;
 /// - FAKE-FAIL: stops at the step limit (exit 1);
-/// - FAKE-HANG: never finishes (killed by the timeout).
+/// - FAKE-HANG: 4 model steps, then keeps sending events and never
+///   finishes (killed by the timeout, so there is no `run.usage`);
+/// - FAKE-BASH: 2 model steps, then proposes a shell command and waits for
+///   an approval that never comes (no more events).
+/// Step and tool events have the shape of Muse Code 1.4.14's.
 /// Each call writes `{cwd, args}` to its own file in the folder
 /// $FAKE_MUSE_LOG (parallel appends to one file can lose a line on
 /// Windows).
@@ -34,8 +38,31 @@ Future<void> main(List<String> args) async {
     ],
   });
 
+  void task(String lifecycle, String kind) =>
+      event('task.lifecycle.$lifecycle', {
+        'kind': 'task_lifecycle',
+        'event': {'kind': lifecycle, 'task_kind': kind},
+      });
+  void step() {
+    task('proposed', 'model.meta.response');
+    task('accepted', 'model.meta.response');
+    task('completed', 'model.meta.response');
+  }
+
   event('run.lifecycle.started', {'prompt': prompt});
   if (prompt.contains('FAKE-HANG')) {
+    for (var i = 0; i < 4; i++) {
+      step();
+    }
+    for (var i = 0; i < 3000; i++) {
+      event('run.output.delta', {'text': '.'});
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+  }
+  if (prompt.contains('FAKE-BASH')) {
+    step();
+    step();
+    task('proposed', 'tool.bash');
     await Future<void>.delayed(const Duration(minutes: 10));
   }
   if (prompt.contains('FAKE-FAIL')) {

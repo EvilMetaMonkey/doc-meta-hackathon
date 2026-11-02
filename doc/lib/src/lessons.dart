@@ -360,17 +360,18 @@ Set<String> candidateFiles(
   return candidates;
 }
 
-/// Score each approved lesson by how many of its files are candidates; keep
-/// those scoring at least 1, highest first, newest first on ties, at most
-/// [limit].
+/// Score each approved lesson (or each lesson with [status], for drafts)
+/// by how many of its files are candidates; keep those scoring at least 1,
+/// highest first, newest first on ties, at most [limit].
 List<LessonMatch> matchLessons(
   Iterable<Lesson> lessons,
   Set<String> candidates, {
   int limit = 3,
+  String status = 'approved',
 }) {
   final matches = [
     for (final lesson in lessons)
-      if (lesson.status == 'approved')
+      if (lesson.status == status)
         LessonMatch(lesson, [
           for (final file in lesson.files)
             if (candidates.contains(file)) file,
@@ -383,6 +384,36 @@ List<LessonMatch> matchLessons(
     return byDate != 0 ? byDate : a.lesson.id.compareTo(b.lesson.id);
   });
   return matches.take(limit).toList();
+}
+
+/// One line saying which lessons matched which files, for people.
+String lessonMatchSummary(List<LessonMatch> matches, Set<String> candidates) {
+  if (candidates.isEmpty) {
+    return 'No lesson matched: the task names no known file to check.';
+  }
+  final files = (candidates.toList()..sort()).join(', ');
+  if (matches.isEmpty) return 'No lesson matched $files.';
+  return 'Lessons matched on $files: ${matches.map((m) => '${m.lesson.id} (${m.matchedFiles.join(', ')})').join('; ')}.';
+}
+
+/// Drafts that would match if approved, for people.
+List<String> draftMatchLines(List<LessonMatch> drafts) => [
+  if (drafts.length == 1)
+    '1 draft covers ${drafts.single.matchedFiles.join(', ')}: ${drafts.single.lesson.id}. Approve it with: doc lesson approve ${drafts.single.lesson.id}'
+  else if (drafts.isNotEmpty) ...[
+    '${drafts.length} drafts cover these files:',
+    for (final draft in drafts)
+      '  ${draft.lesson.id} (${draft.matchedFiles.join(', ')}). Approve it with: doc lesson approve ${draft.lesson.id}',
+  ],
+];
+
+/// `doc start`'s question when no lesson matched: which files were
+/// checked, and whether to start with the task alone.
+String noLessonQuestion(Set<String> candidates, String agent) {
+  final files = candidates.isEmpty
+      ? 'any file (the task names no known file; add --files <path> to check one)'
+      : (candidates.toList()..sort()).join(', ');
+  return 'No lesson matched $files. Start $agent with the task alone? [y/N] ';
 }
 
 /// The agent's first prompt: the brief, a blank line, then the task, or the

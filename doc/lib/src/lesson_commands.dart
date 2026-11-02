@@ -530,20 +530,55 @@ class BriefResult {
   final String? brief;
   final String? footer;
 
-  const BriefResult(this.matches, this.candidates, {this.brief, this.footer});
+  /// Drafts that would match if approved (never used in a brief).
+  final List<LessonMatch> drafts;
+
+  const BriefResult(
+    this.matches,
+    this.candidates, {
+    this.brief,
+    this.footer,
+    this.drafts = const [],
+  });
 }
 
-/// Match [task] against the library (a fixed rule, no model) and, when
-/// lessons match, ask the summary role for a brief. Returns null when the
-/// call failed (already reported).
-Future<BriefResult?> buildBrief(DocContext context, String task) async {
+/// Match [task] against the library (a fixed rule, no model). The
+/// candidate files are the task's path tokens, `--files` and
+/// [extraFiles] (for example a base checkpoint's changed files).
+Future<BriefResult> matchTaskLessons(
+  DocContext context,
+  String task, {
+  Iterable<String> extraFiles = const [],
+}) async {
   final workspace = await _workspace(context);
   final store = _store(context, workspace);
   final lessons = store.approved();
-  final known = await _knownFiles(context, workspace, lessons);
-  final candidates = candidateFiles(task, known, extraFiles: _files(context));
-  final matches = matchLessons(lessons, candidates);
-  if (matches.isEmpty) return BriefResult(matches, candidates);
+  final drafts = store.pendingDrafts();
+  final known = await _knownFiles(context, workspace, [...lessons, ...drafts]);
+  final candidates = candidateFiles(
+    task,
+    known,
+    extraFiles: [..._files(context), ...extraFiles],
+  );
+  return BriefResult(
+    matchLessons(lessons, candidates),
+    candidates,
+    drafts: matchLessons(drafts, candidates, status: 'draft'),
+  );
+}
+
+/// Match [task] against the library and, when lessons match, ask the
+/// summary role for a brief. Returns null when the call failed (already
+/// reported).
+Future<BriefResult?> buildBrief(
+  DocContext context,
+  String task, {
+  Iterable<String> extraFiles = const [],
+}) async {
+  final matched = await matchTaskLessons(context, task, extraFiles: extraFiles);
+  final matches = matched.matches;
+  final candidates = matched.candidates;
+  if (matches.isEmpty) return matched;
   final messages = [
     const ChatMessage('system', briefSystemPrompt),
     ChatMessage(
@@ -561,7 +596,7 @@ Future<BriefResult?> buildBrief(DocContext context, String task) async {
   ];
   if (context.args['show-prompt'] as bool) {
     _printPrepared(context, 'summary', messages);
-    return BriefResult(matches, candidates);
+    return BriefResult(matches, candidates, drafts: matched.drafts);
   }
   final route = context.router.resolve('summary');
   try {
@@ -577,6 +612,7 @@ Future<BriefResult?> buildBrief(DocContext context, String task) async {
       candidates,
       brief: _limitWords(_asBrief(call.content), 100),
       footer: '${call.footer}; ${call.redactions} item(s) redacted',
+      drafts: matched.drafts,
     );
   } on ModelCallException catch (error) {
     context.log(
