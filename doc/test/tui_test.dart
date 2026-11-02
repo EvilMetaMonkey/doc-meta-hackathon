@@ -272,7 +272,15 @@ package:test_api           expect
       expect(frame, contains('  ✗ muse   In money.py, change apply_discount'));
       expect(frame, contains('  ↺ claude Add a function format_price'));
       expect(frame, contains(' undone'));
-      expect(frame, contains('muse · 1969-12-31'));
+      // The turn's local time (the fixture's epoch milliseconds; CI runs in UTC).
+      final at = DateTime.fromMillisecondsSinceEpoch(401);
+      String two(int v) => v.toString().padLeft(2, '0');
+      expect(
+        frame,
+        contains(
+          'muse · ${at.year}-${two(at.month)}-${two(at.day)} ${two(at.hour)}:${two(at.minute)}',
+        ),
+      );
       expect(frame, contains('cp_mvyyf4t6'));
       // Never the full id, never dmc's "(truncated by dmc)".
       expect(frame, isNot(contains(_readme)));
