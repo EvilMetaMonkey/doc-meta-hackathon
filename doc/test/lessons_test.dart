@@ -79,6 +79,60 @@ void main() {
     expect(lesson('no-files', const []).problems(), ['files is empty']);
   });
 
+  test('approval problems say exactly how to fix each one', () {
+    expect(lesson('ok-1', ['a.txt']).approvalProblems(), isEmpty);
+    final unstated = Lesson(
+      id: 'why-1',
+      title: 'Why',
+      files: const ['a.txt'],
+      created: DateTime.utc(2026),
+      source: const LessonSource(checkpoint: 'cp_9'),
+      status: 'draft',
+      body: '## Why it failed\n$unstatedReason',
+    );
+    expect(unstated.approvalProblems(), [
+      "This draft has no reason for the undo. Add one with: doc lesson edit why-1 (replace the 'Not stated' line), or redraft with: doc lesson draft cp_9 --note '…'",
+    ]);
+    expect(lesson('no-files', const []).approvalProblems(), [
+      'It covers no files, so it could never match. Add workspace-relative paths under "files:" with: doc lesson edit no-files',
+    ]);
+    final bad = Lesson(
+      id: 'Bad Id',
+      title: ' ',
+      files: const ['../escape.txt'],
+      created: DateTime.utc(2026),
+      source: const LessonSource(checkpoint: 'cp'),
+      status: 'draft',
+      body: '',
+    );
+    expect(bad.approvalProblems(), hasLength(4));
+    expect(
+      bad.approvalProblems().every((p) => p.contains('doc lesson edit')),
+      isTrue,
+    );
+  });
+
+  test('match summaries, drafts and doc start\'s no-match question', () {
+    final approved = lesson('keep-a', ['a.txt']);
+    final draft = lesson('draft-b', ['b.txt'], status: 'draft');
+    final matches = matchLessons([approved, draft], {'a.txt', 'b.txt'});
+    expect([for (final m in matches) m.lesson.id], ['keep-a']);
+    expect(
+      lessonMatchSummary(matches, {'b.txt', 'a.txt'}),
+      'Lessons matched on a.txt, b.txt: keep-a (a.txt).',
+    );
+    expect(lessonMatchSummary(const [], {'c.txt'}), 'No lesson matched c.txt.');
+    final drafts = matchLessons([approved, draft], {'b.txt'}, status: 'draft');
+    expect(draftMatchLines(drafts), [
+      '1 draft covers b.txt: draft-b. Approve it with: doc lesson approve draft-b',
+    ]);
+    expect(draftMatchLines(const []), isEmpty);
+    expect(
+      noLessonQuestion({'b.txt'}, 'claude-code'),
+      'No lesson matched b.txt. Start claude-code with the task alone? [y/N] ',
+    );
+  });
+
   group('matching rule', () {
     const workspace = [
       'app.py',

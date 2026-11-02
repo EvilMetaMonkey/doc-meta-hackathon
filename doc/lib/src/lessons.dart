@@ -166,6 +166,24 @@ class Lesson {
     );
   }
 
+  /// Each problem that blocks approval with how to fix it, or an empty
+  /// list.
+  List<String> approvalProblems() => [
+    if (body.contains(unstatedReason))
+      'This draft has no reason for the undo. Add one with: doc lesson edit $id (replace the \'Not stated\' line), or redraft with: doc lesson draft ${source.checkpoint} --note \'…\''
+    else if (body.trim().isEmpty)
+      'The body is empty. Write what was tried, why it failed and what to do instead with: doc lesson edit $id',
+    if (!RegExp(r'^[a-z0-9][a-z0-9-]*$').hasMatch(id))
+      'The id "$id" must be lowercase letters, digits and dashes. Fix the id line with: doc lesson edit $id',
+    if (title.trim().isEmpty)
+      'The title is empty. Add one with: doc lesson edit $id',
+    if (files.isEmpty)
+      'It covers no files, so it could never match. Add workspace-relative paths under "files:" with: doc lesson edit $id',
+    for (final file in files)
+      if (!isSafeRelativePath(file))
+        'The file "$file" is not a workspace-relative path (like lib/main.dart). Fix it with: doc lesson edit $id',
+  ];
+
   /// Problems that block approval, or an empty list.
   List<String> problems() => [
     if (!RegExp(r'^[a-z0-9][a-z0-9-]*$').hasMatch(id))
