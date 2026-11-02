@@ -3,6 +3,14 @@
 Event work only (Meta AI Developer Hackathon 2026, from 2026-10-26). Changes to dmc are listed
 by patch in [PATCHES.md](PATCHES.md).
 
+## 2026-11-02: `doc talk` live mode fix
+
+- `doc talk` no longer crashes at the first key in a real terminal ("object is unsendable …
+  Stdin"). The key is read in a helper isolate through a top-level function, and an unreadable
+  stdin counts as Esc.
+- Esc before talking prints one line ("Cancelled. Nothing was recorded or sent.").
+- A test runs the real terminal reader in a subprocess.
+
 ## 2026-10-31: polish, parity and doc doctor
 
 - **Wonder checks plan adherence.** Each judged timeline gets `followed_plan` (yes / partly /
