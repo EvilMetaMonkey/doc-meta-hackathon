@@ -265,7 +265,7 @@ List<Line> _detailColumn(TuiState state, int width, int height) {
   rows.add(const []);
   final detail = state.details[turn.id];
   if (detail?.summary != null) {
-    for (final line in wrap(detail!.summary!, width - 2).take(4)) {
+    for (final line in wrap(shortenIds(detail!.summary!), width - 2).take(4)) {
       rows.add(plain(' $line'));
     }
   } else if (detail?.summarizing ?? false) {

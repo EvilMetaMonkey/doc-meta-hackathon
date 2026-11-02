@@ -149,8 +149,7 @@ class ActionSink implements StringSink {
     _partial.clear();
     final context = [
       for (final line in lines)
-        if (line.trim().isNotEmpty && !line.trimLeft().startsWith('[doc] … '))
-          line,
+        if (!isProgressLine(line)) line,
     ];
     return (
       context: context.length > 14
@@ -868,7 +867,10 @@ class TuiApp {
       'Test command (run in each turn\'s files):',
       value: backend.defaultTest() ?? '',
     );
-    if (test == null) return;
+    if (test == null) {
+      _note('Bisect needs a test command; nothing ran.', Tone.dim);
+      return;
+    }
     final setupAnswer = await askUser(
       Question(
         context: const [
@@ -1059,7 +1061,17 @@ class TuiApp {
         _summaryFromTalk(run.output);
       case 'lessons' || 'lesson':
         await openLessons();
-      case 'status' || 'restore':
+      case 'status':
+        state.pane = PaneKind.turns;
+        final after = run.output
+            .split(RegExp(r'Run it\? \[y/N\][^\n]*\n'))
+            .last;
+        final first = after
+            .split('\n')
+            .where((l) => l.trim().isNotEmpty)
+            .firstOrNull;
+        if (first != null) _note(first.trim(), Tone.good);
+      case 'restore':
         state.pane = PaneKind.turns;
         final summary = summarizeOutput(run.output, max: 1);
         if (summary.isNotEmpty) {

@@ -187,6 +187,20 @@ package:test_api           expect
       );
     });
 
+    test('full checkpoint ids in model text are shortened on screen', () {
+      expect(
+        shortenIds(
+          'Checkpoint cp_mvzr1xvq_42356a45ecccb6128898ede8f44d80af changed money.py.',
+        ),
+        'Checkpoint cp_mvzr1xvq changed money.py.',
+      );
+      expect(isProgressLine('Recording with rec (SoX)… press Space'), isTrue);
+      expect(
+        isProgressLine('I heard: "status" → I\'ll run: doc status'),
+        isFalse,
+      );
+    });
+
     test('files and +/- counts from a turn\'s diff', () {
       final files = filesFromDiff(
         '--- a.py (modified)\n-x\n+y\n+z\n--- b.py (created)\n+new\n',
@@ -620,6 +634,9 @@ package:test_api           expect
           host.screen,
           contains('I heard: "what is the status" → I\'ll run: doc status'),
         );
+        // The question shows what was heard, not the recording's progress.
+        expect(host.screen, isNot(contains('Recording with')));
+        expect(host.screen, isNot(contains('1.8 s of audio sent')));
         await host.press('y');
         await until(
           () => host.screen.contains('Workspace /tmp/shop: 4 checkpoint(s).'),

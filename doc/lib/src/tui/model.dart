@@ -267,22 +267,37 @@ class ActionResult {
   bool get failed => exitCode != null && exitCode != 0;
 }
 
+/// Lines that report progress, not results: live transcripts, recording
+/// and probe status, model footers, Doc's diagnostics. Never shown in a
+/// question or a summary.
+bool isProgressLine(String line) {
+  final text = line.trim();
+  return text.isEmpty ||
+      text.startsWith('[probe ') ||
+      text.startsWith('… ') ||
+      text.startsWith('|') ||
+      (text.startsWith('(') && text.endsWith(')')) ||
+      text.startsWith('[doc] ') ||
+      text.startsWith('Press Space or Enter to talk') ||
+      text.startsWith('Recording with ') ||
+      text.startsWith('Streaming ');
+}
+
+/// Full checkpoint ids in model text, shortened for the screen
+/// (`cp_mvzr1xvq_42356a…` → `cp_mvzr1xvq`).
+String shortenIds(String text) => text.replaceAllMapped(
+  RegExp(r'\b(cp_[a-z0-9]+)_[0-9a-f]{8,}\b'),
+  (m) => m[1]!,
+);
+
 /// The one or two lines of a command's output worth showing: Doc's own
 /// result lines, never progress, probe, setup or model-footer lines.
 List<String> summarizeOutput(String output, {int max = 2}) {
   final keep = <String>[];
   for (final raw in output.split('\n')) {
     final line = raw.trimRight();
-    final text = line.trim();
-    if (text.isEmpty) continue;
-    if (text.startsWith('[probe ') ||
-        text.startsWith('… ') ||
-        text.startsWith('|') ||
-        text.startsWith('(') && text.endsWith(')') ||
-        text.startsWith('[doc] ')) {
-      continue;
-    }
-    keep.add(text);
+    if (isProgressLine(line)) continue;
+    keep.add(line.trim());
   }
   // The end of a command's output says what happened.
   return keep.length <= max ? keep : keep.sublist(keep.length - max);
