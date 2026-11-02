@@ -261,7 +261,7 @@ void main() {
         FakeReply.chat(
           jsonEncode({
             'mode': 'go_back_before',
-            'checkpoint_id': ids[0],
+            'pick': 2, // ids[0], the older of the two turns
             'confidence': 0.95,
             'reason': 'It changed auth.py.',
             'alternatives': [],

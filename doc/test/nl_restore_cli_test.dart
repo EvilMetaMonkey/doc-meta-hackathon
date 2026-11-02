@@ -17,15 +17,16 @@ const draftReply =
     '## Why it failed\nIt broke logins.\n'
     '## What to do instead\nAsk first.';
 
-/// The restore role's JSON answer.
+/// The restore role's JSON answer: list numbers, 1 = newest. The tests'
+/// [ids] are oldest first, so ids[k] is number 4 - k.
 String choose(
-  String id, {
+  int pick, {
   String mode = 'go_back_before',
   double confidence = 0.92,
-  List<String> alternatives = const [],
+  List<int> alternatives = const [],
 }) => jsonEncode({
   'mode': mode,
-  'checkpoint_id': id,
+  'pick': pick,
   'confidence': confidence,
   'reason': 'That turn changed auth.py.',
   'alternatives': alternatives,
@@ -204,7 +205,7 @@ void main() {
   test('go_back_before previews every step, then applies newest first, '
       'and offers a lesson for the oldest', () async {
     final ids = await history();
-    final fake = await meta([FakeReply.chat(choose(ids[1]))]);
+    final fake = await meta([FakeReply.chat(choose(3))]);
     final baseten = await FakeProvider.start([FakeReply.chat(draftReply)]);
     addTearDown(baseten.close);
     writeConfig({'meta': fake.baseUrl, 'baseten': baseten.baseUrl});
@@ -215,6 +216,10 @@ void main() {
       reason: '$err',
     );
     final text = '$out';
+    expect(
+      text,
+      contains('  Turn 3 of 4 · manual · Use hmac in auth · files: auth.py\n'),
+    );
     expect(text, contains('Plan: go back to before ${ids[1]}'));
     expect(text, contains('(3 step(s), newest first)'));
     expect(text, contains('  1. ${ids[3]}'));
@@ -254,7 +259,7 @@ void main() {
 
   test('undo_turn restores that one checkpoint only', () async {
     final ids = await history();
-    await meta([FakeReply.chat(choose(ids[2], mode: 'undo_turn'))]);
+    await meta([FakeReply.chat(choose(2, mode: 'undo_turn'))]);
     answers.add('y');
     expect(
       await doc(['restore', 'undo the readme change', '--no-lesson']),
@@ -268,8 +273,8 @@ void main() {
   });
 
   test('"no" leaves the working copy byte-identical', () async {
-    final ids = await history();
-    await meta([FakeReply.chat(choose(ids[1]))]);
+    await history();
+    await meta([FakeReply.chat(choose(3))]);
     final before = tree();
     answers.add('n');
     expect(await doc(['restore', 'before auth']), 0, reason: '$err');
@@ -278,9 +283,9 @@ void main() {
     expect(await restoredInOrder(), isEmpty);
   });
 
-  test('an id that is not a candidate is refused after one retry', () async {
+  test('a number outside the list is refused after one retry', () async {
     await history();
-    final fake = await meta([FakeReply.chat(choose('cp_mzzzzzzz_00ff'))]);
+    final fake = await meta([FakeReply.chat(choose(7))]);
     final before = tree();
     expect(await doc(['restore', 'before auth', '--yes']), 1);
     expect(fake.requests, hasLength(2));
@@ -289,7 +294,7 @@ void main() {
       contains('That answer was not usable'),
     );
     expect('$out', contains('Doc refused the model\'s answer'));
-    expect('$out', contains('not one of the 4 candidate checkpoint(s)'));
+    expect('$out', contains('the list has 4 checkpoint(s) (1-4)'));
     expect(tree(), before);
   });
 
@@ -297,7 +302,7 @@ void main() {
     final ids = await history();
     final fake = await meta([
       FakeReply.chat('Sure! I would go back before the auth turn.'),
-      FakeReply.chat(choose(ids[3], mode: 'undo_turn')),
+      FakeReply.chat(choose(1, mode: 'undo_turn')),
     ]);
     answers.add('n');
     expect(await doc(['restore', 'undo the last one']), 0, reason: '$err');
@@ -306,12 +311,35 @@ void main() {
     expect('$out', contains('Plan: undo only ${ids[3]}'));
   });
 
+  test('a pick that touches none of the files the request names becomes a '
+      'choice, even at high confidence and with --yes', () async {
+    final ids = await history();
+    // The model picks #4 (utils.py) for a request about the README.
+    await meta([FakeReply.chat(choose(4, confidence: 0.95))]);
+    final before = tree();
+    answers.add('');
+    expect(await doc(['restore', 'before the README.md change', '--yes']), 0);
+    final text = '$out';
+    expect(text, contains('  Turn 4 of 4 · manual · Add slugify to utils'));
+    expect(
+      text,
+      contains(
+        '  Check: Your request names README.md, which turn 4 does not touch; turn 2 does.',
+      ),
+    );
+    expect(text, contains('Doc is not sure enough to pick for you'));
+    expect(text, contains('     ${ids[0]}'));
+    expect(text, contains('     ${ids[2]}'));
+    expect(text, contains('Cancelled. Nothing was changed.'));
+    expect(tree(), before);
+  });
+
   test(
     'low confidence shows the choices and needs a pick, even with --yes',
     () async {
       final ids = await history();
       await meta([
-        FakeReply.chat(choose(ids[1], confidence: 0.4, alternatives: [ids[3]])),
+        FakeReply.chat(choose(3, confidence: 0.4, alternatives: [1])),
       ]);
       final before = tree();
       // No pick (Enter).
@@ -344,7 +372,7 @@ void main() {
 
   test('a conflict in any step\'s preview blocks applying', () async {
     final ids = await history();
-    await meta([FakeReply.chat(choose(ids[1]))]);
+    await meta([FakeReply.chat(choose(3))]);
     // An edit after the last turn, to a file step 2 (README) restores.
     file('README.md').writeAsStringSync('edited by hand\n');
     final before = tree();
@@ -360,7 +388,7 @@ void main() {
   test('a failure mid-apply stops, reports it, and the offered redo puts '
       'the applied steps back', () async {
     final ids = await history();
-    await meta([FakeReply.chat(choose(ids[2]))]);
+    await meta([FakeReply.chat(choose(2))]);
     final before = tree();
     answers.addAll([
       // Between the preview and the apply: README.md, which only step 2
@@ -410,7 +438,7 @@ void main() {
     final hosted = await FakeProvider.start([FakeReply.chat('never')]);
     addTearDown(hosted.close);
     final local = await FakeProvider.start([
-      FakeReply.chat(choose(ids[3], mode: 'undo_turn')),
+      FakeReply.chat(choose(1, mode: 'undo_turn')),
     ]);
     addTearDown(local.close);
     writeConfig({
@@ -432,7 +460,7 @@ void main() {
 
   test('--json prints the plan and the result as one object', () async {
     final ids = await history();
-    await meta([FakeReply.chat(choose(ids[1]))]);
+    await meta([FakeReply.chat(choose(3))]);
     expect(
       await doc(['restore', 'before auth', '--json', '--yes', '--no-lesson']),
       0,
