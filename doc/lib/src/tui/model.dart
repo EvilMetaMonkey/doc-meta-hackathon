@@ -210,11 +210,15 @@ class TurnDetail {
 
 /// The title, summary text and footer from `doc summarize` output:
 /// "Title: …" (when the model gave one), the answer, a blank line, then
-/// "(provider model; … )".
+/// "(provider model; … )". `[doc] ` log lines are skipped.
 ({String? title, String text, String? footer}) parseSummaryOutput(
   String output,
 ) {
-  final lines = output.trim().split('\n');
+  // Doc's own log lines ("[doc] Waking Muse Glimmer…") share the output.
+  final lines = [
+    for (final line in output.trim().split('\n'))
+      if (!line.startsWith('[doc] ')) line,
+  ];
   String? footer;
   String? title;
   if (lines.isNotEmpty &&

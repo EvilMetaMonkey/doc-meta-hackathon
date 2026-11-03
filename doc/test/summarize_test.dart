@@ -136,6 +136,13 @@ void main() {
       expect(parsed.title, 'Discount takes a fraction');
       expect(parsed.text, 'money.py now takes a fraction.');
       expect(parsed.footer, '(baseten m; 1 in / 2 out)');
+      // Seen on a cold Glimmer: Doc's log line comes first.
+      final cold = parseSummaryOutput(
+        '[doc] Waking Muse Glimmer on Modal (can take a couple of minutes)…\n'
+        'Title: Add Usage section to README\nREADME.md gained a Usage section.\n\n(modal g)',
+      );
+      expect(cold.title, 'Add Usage section to README');
+      expect(cold.text, 'README.md gained a Usage section.');
       final old = parseSummaryOutput('money.py changed.\n\n(baseten m)');
       expect(old.title, isNull);
       expect(old.text, 'money.py changed.');
