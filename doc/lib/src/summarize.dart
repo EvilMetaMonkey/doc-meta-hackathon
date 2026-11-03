@@ -5,7 +5,7 @@ import 'redaction.dart';
 
 /// Bumped whenever the summary prompt or answer shape changes, so a cached
 /// summary from an older prompt is not reused.
-const int summaryPromptVersion = 2;
+const int summaryPromptVersion = 3;
 
 const String summarySystemPrompt =
     'You are Doc, the companion to dmc, a rollback safety net for AI coding '
@@ -63,6 +63,13 @@ final List<(RegExp, String)> _forbidden = [
   (
     RegExp(
       r'\b(were|was) not (touched|changed|modified)\b',
+      caseSensitive: false,
+    ),
+    'a list of things not touched',
+  ),
+  (
+    RegExp(
+      r"\b(does|did|do)( not|n't) (alter|change|touch|modify|affect)\b",
       caseSensitive: false,
     ),
     'a list of things not touched',
