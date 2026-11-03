@@ -3,6 +3,27 @@
 Event work only (Meta AI Developer Hackathon 2026, from 2026-10-26). Changes to dmc are listed
 by patch in [PATCHES.md](PATCHES.md).
 
+## 2026-11-03: demo polish (no wins by editing tests, clean pick view, bisect titles)
+
+- **Timelines can't win by editing the tests.** Every agent is told "Do not modify test files
+  unless the task explicitly asks you to." Doc spots test files by the usual conventions
+  (`test/`, `tests/`, `__tests__/`, `spec/`, `*_test.*`, `test_*.*`, `*.test.*`, `*.spec.*`,
+  `*Test.*`) and flags a timeline that changed one: `EDITED TESTS` in the comparison and the
+  ranking, a yellow "edited tests" in the lanes and the pick view, the files under `d`.
+  - The judge hears that changing tests to make them pass is a serious flaw, and which test files
+    each timeline changed. Doc refuses a recommendation of such a timeline unless the task asks
+    for test changes, like a failing one: one retry, then no recommendation.
+  - The TUI's task is "Fix the tests broken by: <title>, without changing the tests"; a spoken
+    task gets ", without changing the tests" unless it mentions tests.
+- **`p` without git noise:** "Timeline 1 · Revert to percent API · tests PASS · money.py +5 −5",
+  the coloured diff from the first hunk with a dim header per file, then the `git apply` lines.
+  The run, full checkpoint ID, base commit, branch and the merge alternative are under `d`.
+- **Lanes** keep their own number only ("[1]"), with the score and ★ recommended.
+- **Bisect's headline** names the turn by its title ("Turn 2 broke the tests: Discount takes a
+  fraction"), fetched with the summary call when it is not cached, without blocking.
+- **Summaries** also refuse "does not alter code, configuration, or dependencies"-style lists
+  (seen from Glimmer); the cache moved to `summaries/v3/` so such summaries are asked again.
+
 ## 2026-11-03: TUI polish (plain summaries and titles, one-line questions, timelines lanes)
 
 - **Summaries without dmc's internals** (`doc summarize` and the TUI). At most 2 sentences or

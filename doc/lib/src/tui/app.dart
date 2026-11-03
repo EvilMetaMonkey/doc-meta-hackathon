@@ -408,6 +408,8 @@ class TuiApp {
       case KeyKind.escape || KeyKind.enter:
         state.pager = null;
         state.help = false;
+      case KeyKind.char when key.char == 'd' && pager?.details != null:
+        state.pager = pager!.details;
       case KeyKind.char
           when key.char == 'q' ||
               key.char == 'd' ||
@@ -1031,8 +1033,7 @@ class TuiApp {
     pane
       ..found = true
       ..firstBad = id
-      ..headline =
-          'Turn ${index + 1} broke the tests: ${screenLabel(bad['label'] as String?)}'
+      ..headline = _badTurnHeadline(index + 1, id, bad['label'] as String?)
       ..files = [
         for (final f
             in (bad['changedFiles'] as List? ?? const []).whereType<Map>())
@@ -1041,7 +1042,34 @@ class TuiApp {
       ..failure = failureEssentials('${result['failingOutputTail'] ?? ''}')
       ..explanation = envelope['explanation'] as String?;
     state.firstBad = id;
+    // The turn's title, from the summary call if it is not cached yet; the
+    // headline uses the prompt until it comes (never blocking).
+    if (_turnTitle(id) == null) {
+      unawaited(
+        summarize(id).then((_) {
+          if (state.bisect?.firstBad != id) return;
+          state.bisect!.headline = _badTurnHeadline(
+            index + 1,
+            id,
+            bad['label'] as String?,
+          );
+          redraw();
+        }),
+      );
+    }
   }
+
+  /// A turn's cached title, if it has one.
+  String? _turnTitle(String id) {
+    final known = state.details[id]?.title;
+    if (known != null) return known;
+    final cached = backend.cachedSummary(id);
+    return cached == null ? null : parseSummaryOutput(cached).title;
+  }
+
+  /// "Turn 2 broke the tests: <title>", else the prompt.
+  String _badTurnHeadline(int number, String id, String? label) =>
+      'Turn $number broke the tests: ${_turnTitle(id) ?? screenLabel(label)}';
 
   // ---- voice --------------------------------------------------------------
 
@@ -1297,7 +1325,7 @@ class TuiApp {
       'Task for three agents, three approaches:',
       value: badTitle == null
           ? 'Fix the failing tests without changing the tests'
-          : 'Fix the tests broken by: $badTitle',
+          : 'Fix the tests broken by: $badTitle, without changing the tests',
     );
     if (task == null) {
       _note('Timelines need a task; nothing ran.', Tone.dim);
@@ -1448,14 +1476,7 @@ class TuiApp {
       return;
     }
     pane.run!.picked = lane.k;
-    state.pager = Pager('Timeline ${lane.k}: ${lane.approach.title}', [
-      for (final line in const LineSplitter().convert(run.output))
-        line.startsWith('  git ')
-            ? plain(line, Tone.strong)
-            : line.startsWith('diff --git') || line.startsWith('@@')
-            ? plain(line, Tone.dim)
-            : diffLineOrPlain(line),
-    ]);
+    state.pager = pickPager(lane, pane.run!, run.output);
     redraw();
   }
 

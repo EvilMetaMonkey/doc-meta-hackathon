@@ -3,7 +3,7 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-11-03 by Claude (step 3: TUI polish and timelines lanes)
+Last updated: 2026-11-03 by Claude (step 4: demo polish)
 
 **Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
 work only. dmc lives in its own repository and is set up in `.deps/dmc` by
@@ -14,6 +14,30 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 `EvilMetaMonkey/dmc-meta-hackathon`.
 
 ## Done
+
+- **Step 4: demo polish** (branch `demo-polish`), from Cowork's review of PR #7's frames.
+  - **No wins by editing tests:** agents get "Do not modify test files unless the task explicitly
+    asks you to."; Doc detects test files by convention (`isTestPath`) and flags a timeline that
+    changed one (`EDITED TESTS` in the comparison and ranking, "edited tests" in the lanes and
+    pick view, the files under `d`). The judge prompt calls it a serious flaw and gets each
+    timeline's test files and whether the task allows test changes (`taskAllowsTestEdits`). Doc
+    refuses a recommendation of such a timeline as it does a failing one (one retry, then none).
+    The TUI's task and spoken tasks add ", without changing the tests".
+  - **`p`:** one summary line, the diff from the first hunk with a header per file, the `git
+    apply` lines; run, full checkpoint ID, base commit, branch and `git merge` under `d`.
+  - **Lanes:** "[1]" only (no "#3 [1]"), the score and ★.
+  - **Bisect headline:** the turn's title, fetched with the summary call when missing.
+  - **Summaries:** "does not alter …" lists are refused too; cache `summaries/v3/`.
+  - **Real run on the Mac** (120×36 pty, a fresh `/tmp/doc-polish4-demo` with the four RUNBOOK
+    turns, Doc data in its own dir; `/tmp/doc-demo` and Muse's user hooks left alone): bisect's
+    headline went from the prompt to "Turn 2 broke the tests: Discount argument now fraction"
+    when the title came (10.7 s); `t` prefilled "Fix the tests broken by: Discount argument now
+    fraction, without changing the tests"; on `muse-spark-1.3-contributor` the lanes were [1]
+    update the checkout caller (FAIL, 3/10), [2] support both (PASS, 7/10), [3] revert (PASS,
+    9/10, ★ recommended). No lane edited tests. `p` and `d` as above. Cost: Muse Code $0.0111,
+    Wonder planner $0.035, judge $0.032, plus Modal GPU time. Found in the run: Glimmer wrote
+    "does not alter code, configuration, or dependencies" (now refused), and a `b` pressed
+    while the first summary ran was dropped with the "busy" note (as designed).
 
 - **Step 3: TUI polish and timelines lanes** (branch `tui-polish`). Cowork's review of PR #6's
   frames, then part H.
@@ -889,6 +913,11 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
 
+- 2026-11-03 · Claude · Step 4, demo polish (branch `demo-polish`): timelines can't win by
+  editing tests (agent rule, detection, flags, judge rule enforced), a clean pick view, single
+  lane numbers, titled bisect headline, one more summary check (cache v3). A real pty run: the
+  revert was recommended. Gates: a clean setup_dmc 36/36; dmc analyzer clean, 236 tests, 3
+  contract tests; Doc analyzer clean, 262 tests.
 - 2026-11-03 · Claude · Step 3, TUI polish (branch `tui-polish`): plain summaries with titles
   (strict JSON, one retry, fallback, cache v2), turns by title, one-line restore/redo/brief
   questions, plurals, bar-note hygiene, the per-file diff preview, and timelines lanes (H) with

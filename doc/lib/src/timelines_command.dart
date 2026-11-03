@@ -739,6 +739,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       ?lesson,
       'Approach ${t.k} of $n: ${t.approach.title}\n${t.approach.plan}',
       'Task: $task',
+      timelineAgentNoTestEditsLine,
       timelineAgentTestLine(testCommand),
     ].join('\n\n');
     final watch = Stopwatch()..start();
@@ -1326,7 +1327,7 @@ Future<bool> _judge(
       null,
       fallback.summary,
       note:
-          'Doc dropped Wonder\'s recommendation: it named a timeline whose tests did not pass ($problem)',
+          'Doc dropped Wonder\'s recommendation: twice it named a timeline Doc does not recommend ($problem)',
     );
   }
   if (judgment == null) {

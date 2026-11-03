@@ -79,6 +79,9 @@ void main() {
         'No files were deleted and no protection changes, secrets, CI or dependency files were touched.',
         'money.py changed; six exclusions applied.',
         'The muse-code agent changed money.py.',
+        // Seen from Glimmer in the step 4 run:
+        'README.md gained a Usage section. The change does not alter code, configuration, or dependencies.',
+        "The change doesn't touch any code.",
       ]) {
         expect(
           () => parseSummaryAnswer(

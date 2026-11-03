@@ -565,7 +565,13 @@ void main() {
       expect(message, contains('Task: fix it'));
       expect(message, contains('=== Timeline 1: Fix helper\nPlan: plan one'));
       expect(message, contains('+    return round(amount, 2)'));
-      expect(message, contains('Tests: FAILED\nFailing output (tail):'));
+      expect(
+        message,
+        contains(
+          'Tests: FAILED\nTest files changed: none\nFailing output (tail):',
+        ),
+      );
+      expect(message, contains('The task allows test changes: no'));
       expect(message, contains('AssertionError: 20.0 != 19.99'));
       expect(message, contains('diff cut at $judgeDiffLimitChars characters'));
       expect(message, contains('=== Timeline 3: Decimal'));
@@ -727,6 +733,142 @@ void main() {
     expect(
       () => lastBisectFile(const {'DOC_DATA_DIR': '/d'}, 'nonsense'),
       throwsFormatException,
+    );
+  });
+
+  group('timelines must not win by editing the tests', () {
+    test('test files by the usual conventions', () {
+      for (final path in [
+        'test/money_test.dart',
+        'tests/check.txt',
+        'src/__tests__/a.js',
+        'spec/a.rb',
+        'money_test.py',
+        'test_money.py',
+        'app.test.ts',
+        'app.spec.js',
+        'src/MoneyTest.java',
+      ]) {
+        expect(isTestPath(path), isTrue, reason: path);
+      }
+      for (final path in [
+        'money.py',
+        'contest.py',
+        'latest/notes.md',
+        'testing.md',
+        'src/Tester.java',
+      ]) {
+        expect(isTestPath(path), isFalse, reason: path);
+      }
+    });
+
+    test('only an explicit ask allows test changes', () {
+      for (final task in [
+        'Fix the tests broken by: Discount takes a fraction, without changing the tests',
+        'fix the failing tests',
+        'try three different fixes for the failing tests',
+        'make the tests pass, do not edit the tests',
+      ]) {
+        expect(taskAllowsTestEdits(task), isFalse, reason: task);
+      }
+      for (final task in [
+        'update the tests for the new fraction API',
+        'add a test for bulk discounts',
+        'change apply_discount and rewrite its tests',
+      ]) {
+        expect(taskAllowsTestEdits(task), isTrue, reason: task);
+      }
+    });
+
+    test('the prompts say so', () {
+      expect(
+        timelineAgentNoTestEditsLine,
+        'Do not modify test files unless the task explicitly asks you to.',
+      );
+      expect(
+        timelineJudgeSystemPrompt,
+        contains('Changing tests to make them pass is a serious flaw'),
+      );
+      expect(
+        timelineJudgeSystemPrompt,
+        contains(
+          'never recommend a timeline that changed test files unless the task explicitly allows test changes',
+        ),
+      );
+    });
+
+    TimelineRun editingRun(String task) {
+      final run = sampleRun();
+      return TimelineRun.fromJson({
+        ...run.toJson(),
+        'task': task,
+        'timelines': [
+          for (final t in run.toJson()['timelines'] as List)
+            if ((t as Map)['k'] == 1)
+              {
+                ...t,
+                'files': [
+                  {'path': 'money.py', 'added': 1, 'removed': 1},
+                  {'path': 'test_money.py', 'added': 2, 'removed': 2},
+                ],
+              }
+            else
+              t,
+        ],
+      });
+    }
+
+    String answer(int? recommended) => jsonEncode({
+      'ranking': [
+        for (final k in [1, 2, 3])
+          {
+            'k': k,
+            'score': 10 - k,
+            'rationale': 'r',
+            'risks': <String>[],
+            'followed_plan': 'yes',
+            'actual_change': 'd',
+          },
+      ],
+      'recommended': recommended,
+      'summary': 's',
+    });
+
+    test(
+      'a timeline that edited tests is flagged and cannot be recommended',
+      () {
+        final run = editingRun('fix it');
+        expect(run.timelines.first.editedTests, ['test_money.py']);
+        expect(
+          () => parseTimelineJudgment(answer(1), run),
+          throwsA(
+            isA<TimelineJudgeRefused>()
+                .having((e) => e.failedRecommendation, 'drop only it', isTrue)
+                .having((e) => e.message, 'message', contains('test_money.py')),
+          ),
+        );
+        expect(
+          timelineJudgeMessage(run, const {}),
+          contains('Test files changed: test_money.py'),
+        );
+        expect(
+          timelineComparison(run).join('\n'),
+          contains('    EDITED TESTS: test_money.py'),
+        );
+        final lines = timelineJudgmentLines(
+          run,
+          TimelineJudgment.fromJson(jsonDecode(answer(null)) as Map),
+        ).join('\n');
+        expect(lines, contains('[1] Fix helper  9/10  — EDITED TESTS'));
+        // When the task asks for test changes, it can be recommended.
+        expect(
+          parseTimelineJudgment(
+            answer(1),
+            editingRun('fix it and update the tests'),
+          ).recommended,
+          1,
+        );
+      },
     );
   });
 }
