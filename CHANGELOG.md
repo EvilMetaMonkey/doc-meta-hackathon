@@ -3,6 +3,41 @@
 Event work only (Meta AI Developer Hackathon 2026, from 2026-10-26). Changes to dmc are listed
 by patch in [PATCHES.md](PATCHES.md).
 
+## 2026-11-03: TUI polish (plain summaries and titles, one-line questions, timelines lanes)
+
+- **Summaries without dmc's internals** (`doc summarize` and the TUI). At most 2 sentences or
+  about 45 words, in the project's terms, plus any real risk. They never mention checkpoint IDs,
+  open/closed, the agent's name, protected/excluded/fatal counts, or a list of what was not
+  touched; those facts are no longer sent for a summary.
+  - The same call returns a 4–6 word title as strict JSON `{title, summary}`. Doc checks it,
+    asks once more, then falls back to the free-text answer. `doc summarize` prints
+    `Title: …` first.
+  - The TUI's summary cache path carries the prompt version (`summaries/v2/`), so old wordy
+    summaries are not reused.
+- **Turns are listed by title** once summarized (the prompt moves to `d`).
+- **Questions in one shape:**
+  - restore (`r`, bisect's offer, voice and `doc restore`) is one line: "Undo this muse turn?
+    README.md: put back the version from before it  [y/N]", or "… 3 files change (money.py,
+    checkout.py, +1)  [y/N]" with the list under `d`. Bisect no longer asks twice;
+  - the brief before an agent is the brief, "From: <lesson title>", then the question; IDs and
+    scores come after the answer;
+  - "1 file", "2 files" everywhere; a test keeps `(s)` plurals out of `lib/`.
+- **The bar note** clears on the next key or after 5 s, and never shows on another pane or over
+  help.
+- **The detail diff** has a dim header per file and starts at the first change.
+- **Timelines lanes (`t`).** It asks the task ("Fix the tests broken by: <title>"), test, setup
+  and agent model with its estimate; then `doc timelines` asks its one `[y/N]` with the cost
+  (the plan and the estimate's working under `d`).
+  - One lane per approach: steps, a live clock, running / done / stalled with the reason /
+    timed out, then tests PASS or FAIL. The lesson used is shown once above; a failing test is
+    named once.
+  - After judging, Wonder's score, "Planned: … / Did: …", the "didn't follow its plan" flag and
+    ★ recommended appear in the same lanes.
+  - `p` shows a lane's diff and the git commands (nothing is applied); `c` cleans the worktrees
+    after asking; `d` holds the models, tokens, costs, worktrees and branches; `o` the agent's
+    log. Voice ("try three different fixes …") opens the same lanes.
+  - `doc timelines` reports the whole run through the progress callback at every change.
+
 ## 2026-11-03: the Doc TUI (`doc ui`) and the dmc splash cleanup
 
 - **`doc ui`** (or plain `doc` in a terminal) opens Doc full screen. It shows the answer, not the

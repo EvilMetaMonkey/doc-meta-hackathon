@@ -150,16 +150,25 @@ this). Panes draw from dmc's JSON and Doc's pure functions.
   frames and script whole flows. Widths follow wcwidth (`■` is one column, as in iTerm2 and
   Terminal.app by default).
 - **Noise rules:** each pane shows the result in a line or two plus what is needed to act; `d`
-  shows details, `o` the raw log. Questions are one line of context then `[y/N]`. Ids are short
+  shows details, `o` the raw log. Questions are one shape: context, then `[y/N]`; restore, redo
+  and timelines' run question say it all on one line, with the list under `d`. The bar note
+  clears on the next key or after 5 s. Counts read "1 file", "2 files". Ids are short
   (`cp_mvygprjf`); labels are cut to the pane, never with "(truncated by dmc)" (that is under
   `d`).
 - **Turns** come from `dmc checkpoint list --json`, polled every 3 s while idle. The summary is
   `doc summarize` (the `summary` role), run when a turn stays selected for 300 ms or on `s`,
-  cached in `summaries/<id>.txt`; the diff is the before → after export diff lesson drafts use.
+  cached in `summaries/v<prompt version>/<id>.txt`. Its `Title:` line names the turn in the
+  list. The diff is the before → after export diff lesson drafts use, with a header per file,
+  from the first change.
 - **Bisect** runs `doc bisect --test … [--setup …] --json`; `DocContext.progress` reports each
   probe (`bisect.probe`), so the strip fills in. The pane keeps the failing test's name and its
-  expected / actual or error lines (`failureEssentials`), never setup output. Then it asks
-  "Restore to before this turn?". The result is saved as `doc bisect` saves it.
+  expected / actual or error lines (`failureEssentials`), never setup output. Then the restore's
+  own one-line question is the offer. The result is saved as `doc bisect` saves it.
+- **Timelines** runs `doc timelines … --agent-model <model>`. `DocContext.progress` reports the
+  whole run (`timelines.run`, the same JSON as `run.json`) at every change, so the lanes fill in:
+  steps, a live clock, the status (with the stall reason), tests, then Wonder's ranking. `p` runs
+  `doc timelines pick`, `c` `doc timelines clean`; `d` shows models, tokens, costs, worktrees
+  and branches; `o` the lane's agent log from the run's folder.
 - **Space** runs `doc talk` in-process with a terminal over the TUI's key stream; Doc's own
   Ctrl-C handling is off (`VoiceDeps.watchInterrupts`) because the TUI owns the terminal.
 - **Agents and the editor** (`a`, `e` in lessons) get the real terminal through
@@ -172,17 +181,17 @@ this). Panes draw from dmc's JSON and Doc's pure functions.
 | Key | What it does |
 |---|---|
 | **Space** | Talk to Doc, anywhere (Space/Enter stops, Esc cancels): "I heard … → I'll run: doc … Run it? [y/N]" |
-| ↑ ↓ | Select a turn (or a lesson) |
+| ↑ ↓ | Select a turn (or a lesson, or a timelines lane) |
 | `s` | Summarize the selected turn in plain English (also automatic after 300 ms; cached) |
 | `d` | Details: full diff, ids, times, the model / tokens / cost line, setup problems with fixes |
 | `o` | The raw log of the selected action (agent output, setup and test runs never reach the screen) |
-| `r` | Restore the selected turn: dmc's preview, one `[y/N]`, then the lesson offer |
+| `r` | Restore the selected turn: one line ("Undo this muse turn? README.md: put back the version from before it  [y/N]"; several files under `d`), then the lesson offer |
 | `u` | Redo an undone turn: dmc's preview, one `[y/N]` |
 | `/` | Restore by words ("before it touched auth") |
-| `b` | Bisect: test and setup asked once, a strip that fills in, the bad turn, then a restore offer |
+| `b` | Bisect: test and setup asked once, a strip that fills in, the bad turn, then the one-line restore question |
 | `l` | Lessons and drafts: Enter shows one, `y` approves, `e` edits (`$VISUAL`/`$EDITOR`), `x` rejects |
-| `a` | Start an agent (muse-code or claude-code) with the matching lessons, like `doc start` |
-| `t` | `doc timelines` in the result pane |
+| `a` | Start an agent (muse-code or claude-code) with the matching lessons, like `doc start`: the brief, "From: <lesson title>", one `[y/N]` |
+| `t` | Timelines: task, test, setup and agent model (with the estimate), one `[y/N]` with the cost, then three live lanes and Wonder's ranking in them; `p` picks a lane (its diff and the git commands; nothing applied), `c` cleans the worktrees |
 | `:` | Command bar: any `doc …` command, or a read-only / preview `dmc …` one |
 | `?` | Every key |
 | Esc / `q` | Close or go back / quit (Ctrl-C and SIGTERM also restore the terminal) |
@@ -235,8 +244,10 @@ abandoned-work export diff) and the redacted failing output go to the `workhorse
 4 plain sentences. `--show-prompt` prints that request instead, and `--local` keeps it on this
 Mac. If the call fails, the result above still stands.
 
-**Next step, never automatic.** "Restore to before this turn? [y/N]" runs the `doc restore` flow
-on that checkpoint: dmc's preview, conflicts never forced, and the lesson offer. **`--yes`
+**Next step, never automatic.** The `doc restore` flow on that checkpoint is the offer: its
+one-line question ("Undo this muse turn? money.py: put back the version from before it  [y/N]"),
+dmc's preview behind it, conflicts never forced, and the lesson offer. (The transcripts below
+are from earlier runs, which asked "Restore to before this turn?" first and wrote "1 file(s)".) **`--yes`
 answers yes to the setup and restore questions; use it only for scripted demos.**
 
 **`--json`** prints one object on stdout, with progress on stderr and no questions:

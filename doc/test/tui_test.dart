@@ -273,6 +273,37 @@ package:test_api           expect
       expect(RegExp('test_checkout_total').allMatches(text), hasLength(1));
       expect(text, contains('ValueError: discount must be between 0 and 1'));
 
+      // Judged: the ranking in the lanes, and Wonder's summary in full.
+      final summary = List.filled(30, 'word').join(' ');
+      run.judgment = {
+        'ranking': [
+          {
+            'k': 2,
+            'score': 7,
+            'rationale': 'r',
+            'followedPlan': 'no',
+            'actualChange': 'Changed checkout.py instead.',
+          },
+          {'k': 1, 'score': 4, 'rationale': 'r', 'followedPlan': 'yes'},
+        ],
+        'recommended': 2,
+        'summary': summary,
+      };
+      final judged = TimelinesPane(run.task)
+        ..update({
+          'type': 'timelines.run',
+          'phase': 'done',
+          'run': run.toJson(),
+        }, now);
+      final ranked = timelinesColumn(judged, 116, now).map(lineText).join('\n');
+      expect(ranked, contains('#1 [2] Approach 2'));
+      expect(ranked, contains('7/10  ★ recommended'));
+      expect(ranked, contains('Planned: Plan 2.'));
+      expect(ranked, contains('Did: Changed checkout.py instead.'));
+      expect(ranked, contains("didn't follow its plan"));
+      expect(ranked, contains('Wonder recommends [2]'));
+      expect(ranked.replaceAll(RegExp(r'\s+'), ' '), contains(summary));
+
       // A running lane's clock is live.
       final live = run.toJson();
       ((live['timelines'] as List)[0] as Map)

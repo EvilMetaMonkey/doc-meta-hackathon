@@ -850,8 +850,7 @@ List<Line> timelinesColumn(TimelinesPane? pane, int width, DateTime now) {
             : 'Wonder recommends [${judgment.recommended}]',
         Tone.strong,
       ),
-      if (judgment.summary.isNotEmpty)
-        Span(' — ${fit(judgment.summary, max(10, width - 32))}'),
+      if (judgment.summary.isNotEmpty) Span(' — ${judgment.summary}'),
     ],
     'interrupted' => plain(
       'Stopped. The worktrees and branches are kept.',
@@ -860,6 +859,26 @@ List<Line> timelinesColumn(TimelinesPane? pane, int width, DateTime now) {
     _ => plain('Done. p shows a lane\'s diff and how to apply it.', Tone.dim),
   };
   rows.add(footer);
+  // Wonder's summary in full (two lines at most), under its verdict.
+  if (judgment != null &&
+      judgment.summary.isNotEmpty &&
+      pane.phase != 'judging') {
+    final verdict = displayWidth(lineText(footer));
+    if (verdict >= width) {
+      rows.removeLast();
+      rows.add([
+        Span(
+          judgment.recommended == null
+              ? 'Wonder recommends none of them'
+              : 'Wonder recommends [${judgment.recommended}]',
+          Tone.strong,
+        ),
+      ]);
+      for (final line in wrap(judgment.summary, width - 2).take(2)) {
+        rows.add(plain('  $line'));
+      }
+    }
+  }
   if (run.picked != null) {
     rows.add(
       plain(
