@@ -5,6 +5,8 @@ import 'dart:io';
 /// depends on a marker in the prompt:
 /// - FAKE-FIX: writes "good" to state.txt, finishes in 3 steps;
 /// - FAKE-WRONG: adds notes.txt and leaves state.txt alone;
+/// - FAKE-TESTS: writes "good" to state.txt and also edits a test file
+///   (tests/state_test.txt);
 /// - FAKE-FAIL: stops at the step limit (exit 1);
 /// - FAKE-HANG: 4 model steps, then keeps sending events and never
 ///   finishes (killed by the timeout, so there is no `run.usage`);
@@ -77,6 +79,11 @@ Future<void> main(List<String> args) async {
   }
   if (prompt.contains('FAKE-FIX')) {
     File('state.txt').writeAsStringSync('good\n');
+  } else if (prompt.contains('FAKE-TESTS')) {
+    File('state.txt').writeAsStringSync('good\n');
+    File('tests${Platform.pathSeparator}state_test.txt')
+      ..createSync(recursive: true)
+      ..writeAsStringSync('expects anything\n');
   } else if (prompt.contains('FAKE-WRONG')) {
     File('notes.txt').writeAsStringSync('tried something else\n');
   }

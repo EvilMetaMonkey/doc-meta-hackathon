@@ -270,6 +270,7 @@ package:test_api           expect
       expect(text, contains('step limit · 3 steps'));
       expect(text, contains('did not finish within 8 steps'));
       expect(text, contains('All 3 fail the same test: test_checkout_total'));
+      expect(text, isNot(contains('edited tests')));
       expect(RegExp('test_checkout_total').allMatches(text), hasLength(1));
       expect(text, contains('ValueError: discount must be between 0 and 1'));
 
@@ -296,7 +297,8 @@ package:test_api           expect
           'run': run.toJson(),
         }, now);
       final ranked = timelinesColumn(judged, 116, now).map(lineText).join('\n');
-      expect(ranked, contains('#1 [2] Approach 2'));
+      expect(ranked, contains('  [2] Approach 2'));
+      expect(ranked, isNot(contains('#1')));
       expect(ranked, contains('7/10  ★ recommended'));
       expect(ranked, contains('Planned: Plan 2.'));
       expect(ranked, contains('Did: Changed checkout.py instead.'));
@@ -323,6 +325,112 @@ package:test_api           expect
         ).map(lineText).join('\n'),
         contains('running · 1 step · 1:15'),
       );
+    });
+
+    test('p: one line, the diff from the first hunk, then how to bring it '
+        'in; ids and branch under d; edited tests flagged', () {
+      final lane = Timeline(
+        k: 1,
+        approach: const TimelineApproach('Revert to percent API', 'p', []),
+        branch: 'doc/timeline/tl-9/1',
+        worktree: '/data/tl-9/1',
+        status: TimelineStatus.done,
+        files: const [
+          TimelineFileChange('money.py', 5, 5),
+          TimelineFileChange('tests/test_money.py', 1, 1),
+        ],
+        test: const TimelineTest(
+          passed: true,
+          timedOut: false,
+          setupFailed: false,
+          seconds: 0.1,
+          tail: 'OK',
+        ),
+      );
+      final run = TimelineRun(
+        id: 'tl-9',
+        createdAt: '2026-11-03T00:00:00Z',
+        task: 't',
+        test: 'python3 -m unittest -q',
+        setup: null,
+        links: const [],
+        maxSteps: 20,
+        timeoutMinutes: 10,
+        repo: '/tmp/shop',
+        workspaceFingerprint: 'f',
+        baseCheckpoint: 'cp_mw0367vv_2e5e901851976e72e75180132fa0eb19',
+        baseState: 'after',
+        baseLabel: null,
+        baseCommit: '49f149cd9686aaaa',
+        brief: null,
+        planner: const {},
+        timelines: [lane],
+      );
+      const output =
+          'Timeline 1 of tl-9: Revert to percent API\n'
+          'Tests: PASS; branch doc/timeline/tl-9/1; 2 files changed against the base.\n'
+          '\n'
+          'Diff against the base (cp_mw0367vv_2e5e901851976e72e75180132fa0eb19 after, commit 49f149cd9686):\n'
+          ' money.py | 10 +++++-----\n'
+          ' 1 file changed, 5 insertions(+), 5 deletions(-)\n'
+          '\n'
+          'diff --git a/money.py b/money.py\n'
+          'index 2934b3a..1d888aa 100644\n'
+          '--- a/money.py\n'
+          '+++ b/money.py\n'
+          '@@ -6,11 +6,11 @@ def round_money(amount):\n'
+          '     return round(amount, 2)\n'
+          '-def apply_discount(amount, discount):\n'
+          '+def apply_discount(amount, percent):\n'
+          '@@ -30,2 +30,2 @@\n'
+          '-x\n'
+          '+y\n'
+          '\n'
+          'Doc changes nothing in your repository. To bring this timeline in, in /tmp/shop:\n'
+          '  git apply --check "/data/tl-9/pick-1.patch"   # dry run\n'
+          '  git apply "/data/tl-9/pick-1.patch"\n'
+          '  git merge --no-ff doc/timeline/tl-9/1\n';
+      final pager = pickPager(lane, run, output);
+      final text = pager.lines.map(lineText).toList();
+      expect(
+        text.first,
+        'Timeline 1 · Revert to percent API · tests PASS · money.py +5 −5, '
+        'tests/test_money.py +1 −1 · edited tests',
+      );
+      final all = text.join('\n');
+      for (final noise in [
+        'diff --git',
+        'index 2934b3a',
+        '--- a/',
+        '+++ b/',
+        '@@',
+        'insertions(+)',
+        ' money.py | 10',
+        'Run ',
+        'cp_mw0367vv',
+        '49f149cd9686',
+        'doc/timeline/',
+      ]) {
+        expect(all, isNot(contains(noise)), reason: noise);
+      }
+      expect(
+        all,
+        contains(
+          'money.py\n     return round(amount, 2)\n-def apply_discount(amount, discount):\n+def apply_discount(amount, percent):\n  ⋯\n-x\n+y',
+        ),
+      );
+      expect(all, contains('  git apply "/data/tl-9/pick-1.patch"'));
+      expect(all, contains("If it doesn't apply, first undo the turn"));
+      final details = pager.details!.lines.map(lineText).join('\n');
+      expect(details, contains('Run: tl-9'));
+      expect(details, contains('Branch: doc/timeline/tl-9/1'));
+      expect(
+        details,
+        contains(
+          'Base: cp_mw0367vv_2e5e901851976e72e75180132fa0eb19 after (commit 49f149cd9686aaaa)',
+        ),
+      );
+      expect(details, contains('git merge --no-ff doc/timeline/tl-9/1'));
     });
 
     test('the detail diff: a dim header per file, from the first change', () {
@@ -756,6 +864,66 @@ package:test_api           expect
       expect(host.screen, contains('Space: talk to Doc'));
     });
 
+    test('bisect names the bad turn by its title; t prefills "Fix the tests '
+        'broken by: <title>, without changing the tests"', () async {
+      backend.summaries[_bug] =
+          'Title: Discount takes a fraction\nmoney.py now takes fractions.\n\n(m)';
+      backend.onRun = (args, io) async {
+        if (args.first == 'restore') {
+          return script(
+            const [],
+            question:
+                'Undo this muse turn? money.py: put back the version from before it  [y/N] ',
+            after: ['Nothing was changed.'],
+          )(args, io);
+        }
+        if (args.first != 'bisect') return 1;
+        io.out.writeln(
+          jsonEncode({
+            'result': {
+              'status': 'found',
+              'firstBad': {
+                'id': _bug,
+                'label':
+                    'In money.py, change apply_discount to take a fraction',
+                'changedFiles': [
+                  {'path': 'money.py', 'change': 'modified'},
+                ],
+              },
+              'failingOutputTail': 'ERROR: test_total (t.T)',
+            },
+          }),
+        );
+        return 0;
+      };
+      await open();
+      await host.press('b');
+      await until(() => host.screen.contains('Test command'));
+      await host.enter();
+      await until(() => host.screen.contains('Setup command'));
+      await host.enter();
+      await until(() => host.screen.contains('Undo this muse turn?'));
+      expect(
+        host.screen,
+        contains('Turn 2 broke the tests: Discount takes a fraction'),
+      );
+      expect(
+        backend.runs.where((r) => r.first == 'summarize' && r.last == _bug),
+        isEmpty,
+      );
+      await host.press('n');
+      await until(() => !host.screen.contains('Undo this muse turn?'));
+      await host.press('t');
+      await until(() => host.screen.contains('Task for three agents'));
+      expect(
+        host.screen,
+        contains(
+          '> Fix the tests broken by: Discount takes a fraction, without changing the tests',
+        ),
+      );
+      await host.escape();
+    });
+
     test('n or Esc answers no', () async {
       final answers = <String?>[];
       backend.onRun = (args, io) async => args.first == 'restore'
@@ -878,12 +1046,14 @@ package:test_api           expect
       await until(() => host.screen.contains('Undo this muse turn? money.py'));
       expect(backend.runs.last, ['restore', _bug]);
       final text = host.screen;
-      expect(backend.runs[backend.runs.length - 2], [
-        'bisect',
-        '--test',
-        'python3 -m unittest -q',
-        '--json',
-      ]);
+      expect(
+        backend.runs,
+        anyElement(
+          equals(['bisect', '--test', 'python3 -m unittest -q', '--json']),
+        ),
+      );
+      // No cached title yet: the summary call is made, without blocking.
+      expect(backend.runs, anyElement(equals(['summarize', _bug])));
       expect(
         text,
         contains('Turn 2 broke the tests: In money.py, change apply_discount'),

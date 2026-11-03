@@ -520,7 +520,8 @@ _Box _pagerBox(Pager pager, int width, int height) {
   final position = pager.lines.length <= visible
       ? 'all'
       : '${pager.offset + 1}-${min(pager.lines.length, pager.offset + visible)} of ${pager.lines.length}';
-  final bottom = '└ ↑↓ PgUp PgDn scroll · Esc close · $position ';
+  final bottom =
+      '└ ↑↓ PgUp PgDn scroll${pager.details == null ? '' : ' · d details'} · Esc close · $position ';
   rows.add([
     Span('$bottom${'─' * max(0, width - displayWidth(bottom) - 1)}┘', Tone.dim),
   ]);
@@ -719,10 +720,6 @@ List<Line> timelinesColumn(TimelinesPane? pane, int width, DateTime now) {
   final entries = {
     for (final e in judgment?.ranking ?? const <JudgeEntry>[]) e.k: e,
   };
-  final rank = {
-    for (final (i, e) in (judgment?.ranking ?? const <JudgeEntry>[]).indexed)
-      e.k: i + 1,
-  };
   String score(double v) => v.toStringAsFixed(v == v.roundToDouble() ? 0 : 1);
   // Failing tests: named once for the whole run, not per lane.
   final failing = <int, String>{
@@ -752,12 +749,12 @@ List<Line> timelinesColumn(TimelinesPane? pane, int width, DateTime now) {
           pane.running &&
           pane.phase == 'running')
         const Span('  testing…', Tone.warn),
+      if (t.editedTests.isNotEmpty) const Span('  edited tests', Tone.warn),
       if (entry != null) Span('  ${score(entry.score)}/10', Tone.strong),
       if (recommended) const Span('  ★ recommended', Tone.good),
     ];
     final rightWidth = displayWidth(lineText(right));
-    final lead =
-        '${selected ? '▶' : ' '} ${rank[t.k] == null ? '' : '#${rank[t.k]} '}[${t.k}] ';
+    final lead = '${selected ? '▶' : ' '} [${t.k}] ';
     final titleRoom = max(10, width - displayWidth(lead) - rightWidth - 2);
     rows.add([
       Span(lead, selected ? Tone.strong : Tone.dim),

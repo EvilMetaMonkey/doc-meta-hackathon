@@ -104,7 +104,18 @@ void main() {
         'fix the failing test',
         '--from-bisect',
       ]);
-      expect(plan(VoiceCommand.timelines).args[1], 'spoken words');
+      expect(
+        plan(VoiceCommand.timelines).args[1],
+        'spoken words, without changing the tests',
+      );
+      expect(
+        timelinesVoiceTask('Try three different fixes.'),
+        'Try three different fixes, without changing the tests',
+      );
+      expect(
+        timelinesVoiceTask('try three fixes and update the tests'),
+        'try three fixes and update the tests',
+      );
       expect(plan(VoiceCommand.timelines).command.alwaysAsk, isTrue);
     });
   });

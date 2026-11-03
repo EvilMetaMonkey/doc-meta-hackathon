@@ -35,6 +35,7 @@ String plan(List<(String, String)> items) => jsonEncode({
             '${_angles[i % _angles.length]} ${switch (marker) {
               'FAKE-FIX' => 'FAKE-FIX: put the good value back in the state file.',
               'FAKE-WRONG' => 'FAKE-WRONG: add a notes file explaining the state instead.',
+              'FAKE-TESTS' => 'FAKE-TESTS: make the check accept the current state.',
               'FAKE-FAIL' => 'FAKE-FAIL: rewrite the whole module from scratch carefully.',
               'FAKE-NOOP' => 'FAKE-NOOP: only read the files and report what you see.',
               'FAKE-BASH' => 'FAKE-BASH: check your work with a shell command at the end.',
@@ -973,6 +974,66 @@ void main() {
     expect('$out', contains('Wonder recommends none of the timelines'));
     expect('$out', contains('Doc dropped Wonder\'s recommendation'));
     expect((runJson()['judgment'] as Map)['recommended'], isNull);
+  });
+
+  test('a timeline that edits a test file is flagged, and recommending it '
+      'twice leaves no recommendation', () async {
+    final meta = await planner(
+      plan([
+        ('Put the value back', 'FAKE-FIX'),
+        ('Loosen the check', 'FAKE-TESTS'),
+      ]),
+      judge: [
+        judged([(2, 9, 'a'), (1, 3, 'b')], 2),
+      ],
+    );
+    expect(
+      await doc([
+        'timelines',
+        'fix it',
+        '--test',
+        goodTest,
+        '--n',
+        '2',
+        '--yes',
+      ]),
+      0,
+      reason: '$err',
+    );
+    // Every agent was told not to touch the tests.
+    final calls = [
+      for (final f in Directory(museLog).listSync().whereType<File>())
+        f.readAsStringSync(),
+    ];
+    expect(calls, hasLength(2));
+    for (final call in calls) {
+      expect(
+        call,
+        contains(
+          'Do not modify test files unless the task explicitly asks you to.',
+        ),
+      );
+    }
+    final timelines = (runJson()['timelines'] as List).cast<Map>();
+    expect([
+      for (final f in timelines[1]['files'] as List) (f as Map)['path'],
+    ], contains('tests/state_test.txt'));
+    final text = '$out';
+    expect(text, contains('    EDITED TESTS: tests/state_test.txt'));
+    expect(
+      text,
+      matches(RegExp(r'\[2\] Loosen the check  9/10 .*— EDITED TESTS')),
+    );
+    expect('$err', contains('it changed test files (tests/state_test.txt)'));
+    expect(text, contains('Wonder recommends none of the timelines'));
+    expect(text, contains('Doc dropped Wonder\'s recommendation'));
+    expect((runJson()['judgment'] as Map)['recommended'], isNull);
+    // The judge saw which test files each timeline changed.
+    final judgeSent =
+        ((meta.requests[1].body!['messages'] as List)[1] as Map)['content']
+            as String;
+    expect(judgeSent, contains('Test files changed: tests/state_test.txt'));
+    expect(judgeSent, contains('The task allows test changes: no'));
   });
 
   test(

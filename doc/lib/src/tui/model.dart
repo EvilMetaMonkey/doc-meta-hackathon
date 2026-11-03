@@ -574,7 +574,11 @@ class Pager {
   final List<Line> lines;
   int offset = 0;
 
-  Pager(this.title, this.lines);
+  /// What `d` opens from this pager (the pick view's run, branch and full
+  /// commands), if anything.
+  final Pager? details;
+
+  Pager(this.title, this.lines, {this.details});
 }
 
 /// The bottom bar's voice line.
@@ -694,6 +698,8 @@ List<Line> timelinesDetails(TimelineRun run) {
         plain(
           '    files: ${[for (final f in t.files) '${f.path} +${f.added} −${f.removed}'].join(', ')}',
         ),
+      if (t.editedTests.isNotEmpty)
+        plain('    edited tests: ${t.editedTests.join(', ')}', Tone.warn),
       if (t.test != null) ...[
         plain(
           '    tests: ${t.test!.passed ? 'PASS' : 'FAIL'} (${t.test!.seconds.toStringAsFixed(1)} s)',
@@ -706,4 +712,97 @@ List<Line> timelinesDetails(TimelineRun run) {
       const [],
     ],
   ];
+}
+
+/// `p` on a lane, without git's noise: one line ("Timeline 1 · Revert to
+/// percent API · tests PASS · money.py +5 −5"), the diff from the first
+/// hunk with a dim header per file, then how to bring it in. The run ID,
+/// full checkpoint ID, base commit, branch and the merge alternative are
+/// under `d`. [output] is `doc timelines pick`'s.
+Pager pickPager(Timeline lane, TimelineRun run, String output) {
+  final lines = const LineSplitter().convert(output);
+  final files = lane.files.isEmpty
+      ? 'no changes'
+      : lane.files
+            .map(
+              (f) => f.added == null
+                  ? '${f.path} (binary)'
+                  : '${f.path} +${f.added} −${f.removed}',
+            )
+            .join(', ');
+  final test = lane.test == null
+      ? 'tests not run'
+      : lane.test!.passed
+      ? 'tests PASS'
+      : 'tests FAIL';
+  final rows = <Line>[
+    [
+      Span('Timeline ${lane.k}', Tone.strong),
+      Span(' · ${lane.approach.title} · '),
+      Span(test, lane.test?.passed ?? false ? Tone.good : Tone.bad),
+      Span(' · $files'),
+      if (lane.editedTests.isNotEmpty) const Span(' · edited tests', Tone.warn),
+    ],
+    const [],
+  ];
+  // The diff: from each file's first hunk; no diff --git, index, ---/+++
+  // or stat lines.
+  final start = lines.indexWhere((l) => l.startsWith('diff --git '));
+  final end = lines.indexWhere((l) => l.startsWith('Doc changes nothing'));
+  var inHunk = false;
+  if (start >= 0) {
+    for (final line in lines.sublist(start, end < 0 ? lines.length : end)) {
+      final header = RegExp(r'^diff --git a/(.+) b/').firstMatch(line);
+      if (header != null) {
+        rows.add(plain(header[1]!, Tone.dim));
+        inHunk = false;
+        continue;
+      }
+      if (line.startsWith('@@')) {
+        // Between hunks, a dim gap; never the first one.
+        if (inHunk) rows.add(plain('  ⋯', Tone.dim));
+        inHunk = true;
+        continue;
+      }
+      if (!inHunk) continue;
+      rows.add(diffLine(line));
+    }
+    while (rows.isNotEmpty && lineText(rows.last).trim().isEmpty) {
+      rows.removeLast();
+    }
+  }
+  final patch = RegExp(r'git apply "([^"]+)"').firstMatch(output)?[1];
+  rows
+    ..add(const [])
+    ..add(plain('To bring it in, in ${run.repo}:', Tone.strong))
+    ..add(plain('  git apply --check "${patch ?? '<patch>'}"   # dry run'))
+    ..add(plain('  git apply "${patch ?? '<patch>'}"'))
+    ..add(
+      plain(
+        "If it doesn't apply, first undo the turn it started from (r on it, or doc restore; d has the full command).",
+        Tone.dim,
+      ),
+    );
+  final details = Pager('Pick details · ${run.id}', [
+    plain('Run: ${run.id}'),
+    plain('Timeline ${lane.k}: ${lane.approach.title}'),
+    plain('Branch: ${lane.branch}'),
+    plain('Worktree: ${lane.worktree}'),
+    plain(
+      'Base: ${run.baseCheckpoint} ${run.baseState}'
+      '${run.baseCommit == null ? '' : ' (commit ${run.baseCommit})'}',
+    ),
+    if (patch != null) plain('Patch: $patch'),
+    const [],
+    for (final line in end < 0 ? const <String>[] : lines.sublist(end))
+      plain(line),
+    if (end < 0)
+      for (final line in lines.take(start < 0 ? lines.length : start))
+        plain(line),
+  ]);
+  return Pager(
+    'Timeline ${lane.k}: ${lane.approach.title}',
+    rows,
+    details: details,
+  );
 }

@@ -204,7 +204,7 @@ VoiceAction planVoiceAction(VoiceIntent intent, String transcript) {
     VoiceCommand.status => VoiceAction(intent.command, ['status']),
     VoiceCommand.timelines => VoiceAction(intent.command, [
       'timelines',
-      intent.text.isEmpty ? heard : intent.text,
+      timelinesVoiceTask(intent.text.isEmpty ? heard : intent.text),
       '--from-bisect',
     ]),
     VoiceCommand.unknown => throw StateError('handled above'),
@@ -217,3 +217,12 @@ String describeDocCommand(List<String> args) => [
   for (final arg in args)
     RegExp(r'^[A-Za-z0-9_./=:-]+$').hasMatch(arg) ? arg : jsonEncode(arg),
 ].join(' ');
+
+/// The spoken timelines task, with ", without changing the tests" added
+/// unless the words already mention tests.
+String timelinesVoiceTask(String words) {
+  final text = words.trim().replaceFirst(RegExp(r'[.!?]+$'), '');
+  return RegExp(r'\btests?\b', caseSensitive: false).hasMatch(text)
+      ? text
+      : '$text, without changing the tests';
+}

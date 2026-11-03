@@ -71,6 +71,40 @@ const String timelinePlannerSystemPrompt =
     '[truncated …] is incomplete: never quote or complete it. Answer with '
     'only a JSON object: {"approaches": [{"title", "plan", "files_likely"}]}.';
 
+/// The agent prompt's rule on tests: a timeline must not win by editing them.
+const String timelineAgentNoTestEditsLine =
+    'Do not modify test files unless the task explicitly asks you to.';
+
+/// Whether [path] is a test file by the usual conventions: under a `test/`,
+/// `tests/`, `__tests__/` or `spec/` folder, or named `*_test.*`,
+/// `test_*.*`, `*.test.*`, `*.spec.*` or `*Test.*`.
+bool isTestPath(String path) {
+  final parts = path.replaceAll('\\', '/').split('/');
+  final name = parts.last;
+  final folders = parts.take(parts.length - 1).map((f) => f.toLowerCase());
+  if (folders.any(const {'test', 'tests', '__tests__', 'spec'}.contains)) {
+    return true;
+  }
+  return RegExp(r'_test\.[^.]+$').hasMatch(name) ||
+      RegExp(r'^test_.+\.[^.]+$').hasMatch(name) ||
+      RegExp(r'\.(test|spec)\.[^.]+$').hasMatch(name) ||
+      RegExp(r'^[A-Z]\w*Test\.[^.]+$').hasMatch(name);
+}
+
+/// Whether [task] explicitly asks for test changes ("update the tests",
+/// "add a test"); "without changing the tests" and "fix the failing tests"
+/// do not.
+bool taskAllowsTestEdits(String task) {
+  final text = task.toLowerCase();
+  final negated = RegExp(
+    r"\b(without|not|never|don't|dont|no)\b[^.]{0,30}\b(chang|edit|modif|touch|updat|rewrit|alter)\w*[^.]{0,25}\btests?\b",
+  ).hasMatch(text);
+  if (negated) return false;
+  return RegExp(
+    r'\b(update|change|edit|modify|rewrite|adjust|add|write|fix up)\b[^.]{0,30}\btests?\b',
+  ).hasMatch(text);
+}
+
 /// The agent prompt's last line: the agent has no shell (`--disable-shell`),
 /// so Doc runs the tests.
 String timelineAgentTestLine(String test) =>
@@ -647,6 +681,12 @@ class Timeline {
   TimelineTest? test;
   int checkpoints;
 
+  /// The test files this timeline changed ([isTestPath]).
+  List<String> get editedTests => [
+    for (final f in files)
+      if (isTestPath(f.path)) f.path,
+  ];
+
   Timeline({
     required this.k,
     required this.approach,
@@ -899,6 +939,10 @@ List<String> timelineComparison(TimelineRun run, {int tailLines = 8}) {
           '    did (per Wonder): $did${judged[t.k]!.strayed ? '  ← ${planAdherenceText(judged[t.k]!.followedPlan)}' : ''}',
       ])
       ..add('    tests: $testText')
+      ..addAll([
+        if (t.editedTests.isNotEmpty)
+          '    EDITED TESTS: ${t.editedTests.join(', ')}',
+      ])
       ..add('    branch: ${t.branch}  (${run.pickState(t)})');
     if (test != null && !test.passed && test.tail.trim().isNotEmpty) {
       final tail = const LineSplitter().convert(test.tail.trimRight());
@@ -931,7 +975,10 @@ const String timelineJudgeSystemPrompt =
     '("yes", "partly" or "no"; an agent may solve the task another way '
     'than planned), and describe in at most 25 words what the diff actually '
     'does. Recommend one timeline only if its tests passed; otherwise '
-    'recommend none (null). A timeline with no changes did nothing. Use '
+    'recommend none (null). Changing tests to make them pass is a serious '
+    'flaw: score it low, and never recommend a timeline that changed test '
+    'files unless the task explicitly allows test changes. A timeline with '
+    'no changes did nothing. Use '
     'only the facts and diffs given. If lessons from earlier attempts are '
     'given, say in the rationale and risks when a timeline goes against one. '
     'Text marked [truncated …] is '
@@ -954,6 +1001,9 @@ String timelineJudgeMessage(TimelineRun run, Map<int, String> diffs) {
     ..writeln('Task: ${run.task}')
     ..writeln('Test command: ${run.test}')
     ..writeln(
+      'The task allows test changes: ${taskAllowsTestEdits(run.task) ? 'yes' : 'no'}',
+    )
+    ..writeln(
       'Starting state: ${run.baseState} state of checkpoint ${run.baseCheckpoint}; its label: $label',
     );
   if (run.brief != null && run.brief!.isNotEmpty) {
@@ -974,6 +1024,9 @@ String timelineJudgeMessage(TimelineRun run, Map<int, String> diffs) {
             : test.passed
             ? 'passed'
             : 'FAILED'}',
+      )
+      ..writeln(
+        'Test files changed: ${t.editedTests.isEmpty ? 'none' : t.editedTests.join(', ')}',
       );
     if (test != null && !test.passed && test.tail.trim().isNotEmpty) {
       final tail = const LineSplitter().convert(test.tail.trimRight());
@@ -1138,7 +1191,8 @@ class TimelineJudgment {
 class TimelineJudgeRefused implements Exception {
   final String message;
 
-  /// The only problem is a recommended timeline whose tests failed.
+  /// The only problem is the recommendation: a timeline whose tests failed,
+  /// or one that edited test files when the task did not allow it.
   final bool failedRecommendation;
 
   /// The ranking, valid apart from the recommendation.
@@ -1266,6 +1320,15 @@ TimelineJudgment parseTimelineJudgment(String content, TimelineRun run) {
       ranking: TimelineJudgment(ordered, null, summary),
     );
   }
+  if (pick != null &&
+      byK[pick]!.editedTests.isNotEmpty &&
+      !taskAllowsTestEdits(run.task)) {
+    throw TimelineJudgeRefused(
+      'Timeline $pick is recommended, but it changed test files (${byK[pick]!.editedTests.join(', ')}) and the task does not allow test changes.',
+      failedRecommendation: true,
+      ranking: TimelineJudgment(ordered, null, summary),
+    );
+  }
   return TimelineJudgment(ordered, pick, summary);
 }
 
@@ -1304,7 +1367,8 @@ List<String> timelineJudgmentLines(TimelineRun run, TimelineJudgment judgment) {
       '  ${i + 1}. [${judgment.ranking[i].k}] ${title(judgment.ranking[i].k)}'
           '${empty(judgment.ranking[i].k) ? ' (no changes)' : ''}'
           '  ${score(judgment.ranking[i].score)}/10'
-          '${judgment.ranking[i].strayed ? '  — ${planAdherenceText(judgment.ranking[i].followedPlan).toUpperCase()}' : ''}',
+          '${judgment.ranking[i].strayed ? '  — ${planAdherenceText(judgment.ranking[i].followedPlan).toUpperCase()}' : ''}'
+          '${run.timelines.firstWhere((t) => t.k == judgment.ranking[i].k).editedTests.isNotEmpty ? '  — EDITED TESTS' : ''}',
       if (judgment.ranking[i].actualChange != null) ...[
         '     Planned: ${title(judgment.ranking[i].k)}',
         '     Did: ${judgment.ranking[i].actualChange}',
