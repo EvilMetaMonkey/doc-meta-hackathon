@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'abandoned_work.dart';
 import 'summarize.dart';
+import 'plural.dart';
 
 /// Natural-language restore, the deterministic part: the candidates Doc
 /// shows the model, the validation of the model's answer into a plan, and
@@ -462,7 +463,7 @@ NlRestorePlan planNaturalRestore(
   RestoreCandidate find(int number, String what) {
     if (number < 1 || number > candidates.length) {
       throw NlRestoreRefused(
-        'The model picked $what $number, but the list has ${candidates.length} checkpoint(s) (1-${candidates.length}). Doc only restores a checkpoint it offered.',
+        'The model picked $what $number, but the list has ${plural(candidates.length, 'checkpoint')} (1-${candidates.length}). Doc only restores a checkpoint it offered.',
       );
     }
     return candidates[number - 1];

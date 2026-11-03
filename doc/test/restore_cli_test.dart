@@ -117,13 +117,16 @@ void main() {
     answers.add('n');
     expect(await doc(['restore', id]), 0, reason: '$err');
     final text = '$out';
-    expect(text, contains('Checkpoint $id (closed): agent turn'));
-    expect(text, contains('Restore would change 1 file(s):'));
+    // One line: no checkpoint ID, no lifecycle state.
+    expect(text, isNot(contains(id)));
+    expect(text, isNot(contains('closed')));
+    expect(text, isNot(contains('Restore would change')));
     expect(
       text,
-      contains('  - price.txt: put back the version from before the turn'),
+      contains(
+        'Undo this change? price.txt: put back the version from before it  [y/N] Nothing was changed.',
+      ),
     );
-    expect(text, contains('Restore these files? [y/N] Nothing was changed.'));
     expect(file('price.txt').readAsStringSync(), 'percent 0-1\n');
     final show = await dmcJson(['checkpoint', 'show', id]);
     expect((show['data'] as Map)['operations'], isEmpty);
@@ -143,7 +146,13 @@ void main() {
       expect(await doc(['restore', id]), 0, reason: '$err');
       final text = '$out';
       expect(text, contains('  - new.txt: delete it (the turn created it)'));
-      expect(text, contains('Restored 2 file(s) through dmc (operation op_'));
+      expect(
+        text,
+        contains(
+          'Undo this change? 2 files change (new.txt, price.txt)  [y/N] ',
+        ),
+      );
+      expect(text, contains('Restored 2 files through dmc (operation op_'));
       expect(
         text,
         contains('Draft a lesson from the work you just undid? [Y/n] '),
@@ -191,7 +200,7 @@ void main() {
     final id = await turn({'price.txt': 'percent 0-1\n'});
     answers.add('y');
     expect(await doc(['restore', id, '--no-lesson']), 0, reason: '$err');
-    expect('$out', contains('Restored 1 file(s)'));
+    expect('$out', contains('Restored 1 file'));
     expect('$out', isNot(contains('Draft a lesson')));
     expect(baseten.requests, isEmpty);
   });
@@ -244,7 +253,12 @@ void main() {
     writeConfig({'baseten': baseten.baseUrl, 'local': local.baseUrl});
     final id = await turn({'price.txt': 'percent 0-1\n'});
     expect(await doc(['restore', id, '--yes', '--local']), 0, reason: '$err');
-    expect('$out', contains('Restore these files? [y/N] yes (--yes)'));
+    expect(
+      '$out',
+      contains(
+        'Undo this change? price.txt: put back the version from before it  [y/N] yes (--yes)',
+      ),
+    );
     expect('$out', contains('Draft saved'));
     expect(local.requests, hasLength(1));
     expect(baseten.requests, isEmpty);

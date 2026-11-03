@@ -112,23 +112,24 @@ cd doc && dart pub get --enforce-lockfile && dart analyze --fatal-infos \
 
 `doc ui`, or plain `doc` in a terminal, opens Doc full screen (80×24 at least; 120×36 for the
 video). It shows the answer, not the process: the turns newest first (● ok, ✗ the turn that
-broke the tests, ↺ undone, ○ open), and for the selected one a plain-English summary, the files
-with +/− counts and the start of the diff. Raw output goes to a log per action (`o`).
+broke the tests, ↺ undone, ○ open), listed by a short title once summarized, and for the selected
+one a plain-English summary (two sentences at most, in your project's terms), the files with +/−
+counts and the start of the diff. Raw output goes to a log per action (`o`).
 
 | Key | What it does |
 |---|---|
 | **Space** | Talk to Doc, anywhere (Space/Enter stops, Esc cancels): "I heard … → I'll run: doc … Run it? [y/N]" |
-| ↑ ↓ | Select a turn (or a lesson) |
+| ↑ ↓ | Select a turn (or a lesson, or a timelines lane) |
 | `s` | Summarize the selected turn in plain English (also automatic after 300 ms; cached) |
 | `d` | Details: full diff, ids, times, the model / tokens / cost line, setup problems with fixes |
 | `o` | The raw log of the selected action (agent output, setup and test runs never reach the screen) |
-| `r` | Restore the selected turn: dmc's preview, one `[y/N]`, then the lesson offer |
+| `r` | Restore the selected turn: one line ("Undo this muse turn? README.md: put back the version from before it  [y/N]"; several files under `d`), then the lesson offer |
 | `u` | Redo an undone turn: dmc's preview, one `[y/N]` |
 | `/` | Restore by words ("before it touched auth") |
-| `b` | Bisect: test and setup asked once, a strip that fills in, the bad turn, then a restore offer |
+| `b` | Bisect: test and setup asked once, a strip that fills in, the bad turn, then the one-line restore question |
 | `l` | Lessons and drafts: Enter shows one, `y` approves, `e` edits (`$VISUAL`/`$EDITOR`), `x` rejects |
-| `a` | Start an agent (muse-code or claude-code) with the matching lessons, like `doc start` |
-| `t` | `doc timelines` in the result pane |
+| `a` | Start an agent (muse-code or claude-code) with the matching lessons, like `doc start`: the brief, "From: <lesson title>", one `[y/N]` |
+| `t` | Timelines: task, test, setup and agent model (with the estimate), one `[y/N]` with the cost, then three live lanes and Wonder's ranking in them; `p` picks a lane (its diff and the git commands; nothing applied), `c` cleans the worktrees |
 | `:` | Command bar: any `doc …` command, or a read-only / preview `dmc …` one |
 | `?` | Every key |
 | Esc / `q` | Close or go back / quit (Ctrl-C and SIGTERM also restore the terminal) |

@@ -8,7 +8,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../doctor_command.dart';
+import '../plural.dart';
+import '../restore_command.dart' show restoreQuestion, turnPhrase;
 import '../talk_command.dart';
+import '../timelines.dart';
 import 'keys.dart';
 import 'model.dart';
 import 'render.dart';
@@ -81,7 +84,9 @@ abstract class TuiBackend {
   Future<List<LessonItem>> lessons();
 
   String? cachedSummary(String checkpointId);
-  void saveSummary(String checkpointId, String text, String? footer);
+
+  /// Cache `doc summarize`'s output ([parseSummaryOutput] reads it back).
+  void saveSummary(String checkpointId, String output);
 
   /// The workspace's `bisectTest` setting, else the last bisect's test.
   String? defaultTest();
@@ -91,6 +96,9 @@ abstract class TuiBackend {
 
   /// Whether the summary role runs on Modal (Glimmer may be cold).
   bool get summaryOnModal;
+
+  /// Muse Code's configured model (for timelines' agents), if known.
+  String? defaultAgentModel();
 }
 
 /// A sink for one action: everything goes to its log file and to the
@@ -169,6 +177,9 @@ class TuiApp {
   final Duration summaryDelay;
   final Duration splashFor;
 
+  /// How long a bar note stays (it also clears on the next pane key).
+  final Duration noteFor;
+
   /// Opens the log file for an action; returns the sink and its path.
   final ({StringSink sink, String path, Future<void> Function() close})
   Function(String name)
@@ -178,7 +189,9 @@ class TuiApp {
   StreamSubscription<KeyEvent>? _keys;
   Completer<String?>? _answer;
   Timer? _poll;
+  Timer? _tick;
   Timer? _summaryTimer;
+  Timer? _noteTimer;
   bool _busy = false;
   final Map<String, String> _logs = {};
 
@@ -193,6 +206,7 @@ class TuiApp {
     this.pollEvery = const Duration(seconds: 3),
     this.summaryDelay = const Duration(milliseconds: 300),
     this.splashFor = const Duration(milliseconds: 1200),
+    this.noteFor = const Duration(seconds: 5),
     bool splash = true,
     String? dmcVersion,
   }) : state = TuiState(HeaderStatus(workspaceName: backend.workspaceName)) {
@@ -201,6 +215,7 @@ class TuiApp {
   }
 
   void redraw() {
+    state.now = DateTime.now();
     final (width, height) = host.size;
     host.draw(renderTui(state, width, height, color: host.color));
   }
@@ -221,9 +236,18 @@ class TuiApp {
     _poll = Timer.periodic(pollEvery, (_) {
       if (!_busy && state.question == null) unawaited(refreshTurns());
     });
+    // The lanes' clocks tick while timelines run.
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (state.pane == PaneKind.timelines &&
+          (state.timelines?.running ?? false)) {
+        redraw();
+      }
+    });
     final code = await _done.future;
     _poll?.cancel();
+    _tick?.cancel();
     _summaryTimer?.cancel();
+    _noteTimer?.cancel();
     await _keys?.cancel();
     return code;
   }
@@ -261,6 +285,19 @@ class TuiApp {
       }
       state.emptyReason = null;
       final turns = turnsFromList(listed);
+      // Cached titles for the list; a summary (and title) is only asked
+      // for when a turn is selected.
+      for (final turn in turns) {
+        final detail = state.details.putIfAbsent(turn.id, TurnDetail.new);
+        if (detail.summary != null) continue;
+        final cached = backend.cachedSummary(turn.id);
+        if (cached == null) continue;
+        final parsed = parseSummaryOutput(cached);
+        detail
+          ..title = parsed.title
+          ..summary = parsed.text
+          ..summaryFooter = parsed.footer;
+      }
       state.turns = turns;
       state.turnsLoaded = true;
       state.firstBad =
@@ -324,7 +361,9 @@ class TuiApp {
     String? answer;
     var done = false;
     if (question.yesNo) {
-      if (key.isChar('y') || key.isChar('Y')) {
+      if (key.isChar('d') && question.context.isNotEmpty) {
+        question.showDetails = !question.showDetails;
+      } else if (key.isChar('y') || key.isChar('Y')) {
         answer = 'y';
         done = true;
       } else if (key.isChar('n') ||
@@ -418,6 +457,9 @@ class TuiApp {
   }
 
   void _paneKey(KeyEvent key) {
+    // The note was about what just happened; the next key moves on (and
+    // never carries it into another pane).
+    _clearNote();
     if (key.kind == KeyKind.space) {
       unawaited(talk());
       return;
@@ -435,11 +477,7 @@ class TuiApp {
       return;
     }
     if (key.kind == KeyKind.escape) {
-      if (state.pane != PaneKind.turns) {
-        state.pane = PaneKind.turns;
-      } else {
-        state.note = null;
-      }
+      if (state.pane != PaneKind.turns) state.pane = PaneKind.turns;
       return;
     }
     if (key.isChar('o')) {
@@ -451,8 +489,7 @@ class TuiApp {
       return;
     }
     if (_busy && !key.isChar('?')) {
-      state.note = 'Doc is busy with the last action; one moment.';
-      state.noteTone = Tone.warn;
+      _note('Doc is busy with the last action; one moment.', Tone.warn);
       return;
     }
     switch (state.pane) {
@@ -468,6 +505,8 @@ class TuiApp {
         }
       case PaneKind.result:
         _globalKey(key);
+      case PaneKind.timelines:
+        _timelinesKey(key);
     }
   }
 
@@ -635,10 +674,23 @@ class TuiApp {
     redraw();
   }
 
+  /// A one-line note in the bar. It clears after [noteFor], or on the next
+  /// pane key.
   void _note(String text, [Tone tone = Tone.normal]) {
     state.note = text;
     state.noteTone = tone;
+    _noteTimer?.cancel();
+    _noteTimer = Timer(noteFor, () {
+      if (state.note != text) return;
+      state.note = null;
+      redraw();
+    });
     redraw();
+  }
+
+  void _clearNote() {
+    _noteTimer?.cancel();
+    state.note = null;
   }
 
   /// The command bar: `doc …` (or a bare Doc command), or a read-only /
@@ -711,6 +763,7 @@ class TuiApp {
     if (detail.summary == null && cached != null) {
       final parsed = parseSummaryOutput(cached);
       detail
+        ..title = parsed.title
         ..summary = parsed.text
         ..summaryFooter = parsed.footer;
     }
@@ -772,9 +825,10 @@ class TuiApp {
     if (run.code == 0) {
       final parsed = parseSummaryOutput(run.output);
       detail
+        ..title = parsed.title
         ..summary = parsed.text
         ..summaryFooter = parsed.footer;
-      backend.saveSummary(id, parsed.text, parsed.footer);
+      backend.saveSummary(id, run.output);
     } else {
       detail.summaryError = 'No summary (o shows why).';
     }
@@ -792,7 +846,8 @@ class TuiApp {
       summary.isEmpty ? 'Restore finished.' : summary.single,
       run.code == 0 ? Tone.good : Tone.bad,
     );
-    state.pane = PaneKind.turns;
+    // Declined (bisect's offer): stay where the question was asked.
+    if (run.output.contains('Restored ')) state.pane = PaneKind.turns;
     await refreshTurns();
   }
 
@@ -838,10 +893,17 @@ class TuiApp {
       );
       return;
     }
-    final yes = await confirm([
-      'Redo ${shortId(turn.id)} (${turn.who}): ${screenLabel(turn.label)}',
-      for (final a in actions) '  ${a['path']}: put back the turn\'s version',
-    ], 'Redo this turn (${actions.length} file(s))? [y/N]');
+    final yes = await confirm(
+      [
+        if (actions.length > 1)
+          for (final a in actions)
+            '  ${a['path']}: put back the turn\'s version',
+      ],
+      restoreQuestion('Redo ${turnPhrase(turn.agent)}?', [
+        for (final a in actions)
+          (path: '${a['path']}', action: 'put back the turn\'s version'),
+      ]).trimRight(),
+    );
     if (!yes) {
       _note('Nothing was changed.', Tone.dim);
       return;
@@ -932,11 +994,8 @@ class TuiApp {
     _fillBisect(pane, run.output, candidates);
     redraw();
     if (pane.found && pane.firstBad != null) {
-      final yes = await confirm(
-        const [],
-        'Restore to before this turn? It undoes ${shortId(pane.firstBad!)} through dmc. [y/N]',
-      );
-      if (yes) await restoreTurn(pane.firstBad!);
+      // doc restore's own one-line question is the offer.
+      await restoreTurn(pane.firstBad!);
     }
     await refreshTurns();
   }
@@ -1001,10 +1060,17 @@ class TuiApp {
     }
     redraw();
     String? routed;
+    TimelinesPane? lanes;
     final run = await runDocAction(
       'talk',
       ['talk'],
       voice: VoiceDeps(terminal: terminal, watchInterrupts: false),
+      // "Try three different fixes…": the lanes open on the first event.
+      onProgress: (event) {
+        if (event['type'] != 'timelines.run') return;
+        _timelinesProgress(lanes, event);
+        lanes = state.timelines;
+      },
       onLine: (line) {
         final text = line.trim();
         if (text.startsWith('… ')) {
@@ -1062,6 +1128,8 @@ class TuiApp {
         _summaryFromTalk(run.output);
       case 'lessons' || 'lesson':
         await openLessons();
+      case 'timelines' when lanes != null:
+        _finishTimelines(lanes!, run);
       case 'status':
         state.pane = PaneKind.turns;
         final after = run.output
@@ -1099,9 +1167,10 @@ class TuiApp {
     final parsed = parseSummaryOutput(after);
     if (parsed.text.isNotEmpty) {
       state.details.putIfAbsent(id, TurnDetail.new)
+        ..title = parsed.title
         ..summary = parsed.text
         ..summaryFooter = parsed.footer;
-      backend.saveSummary(id, parsed.text, parsed.footer);
+      backend.saveSummary(id, after);
     }
     state.pane = PaneKind.turns;
   }
@@ -1206,29 +1275,215 @@ class TuiApp {
   }
 
   /// `t`: `doc timelines` in the result pane (lanes come later).
+  /// `t`: three Muse Code agents, three approaches, in lanes. Asks the
+  /// task (from the last bisect's bad turn), test, setup and model, then
+  /// `doc timelines` asks its one [y/N] with the cost.
   Future<void> timelines() async {
-    final task = await askText(
-      'Task for the timelines (three agents, three approaches):',
-      value: 'fix the failing tests without changing the tests',
-    );
-    if (task == null) return;
     final last = backend.lastBisect();
-    final args = <String>['timelines', task];
-    if (last != null) {
-      args.add('--from-bisect');
-    } else {
-      final test = await askText(
-        'Test command:',
-        value: backend.defaultTest() ?? '',
-      );
-      if (test == null) return;
-      args.addAll(['--test', test]);
+    final firstBad = last?['firstBad'] as Map?;
+    final bad = firstBad?['id'] as String?;
+    String? badTitle;
+    if (bad != null) {
+      final cached = backend.cachedSummary(bad);
+      badTitle =
+          state.details[bad]?.title ??
+          (cached == null ? null : parseSummaryOutput(cached).title) ??
+          screenLabel(
+            state.turns.where((t) => t.id == bad).firstOrNull?.label ??
+                firstBad!['label'] as String?,
+          );
     }
-    state.result = ActionResult(title: 'doc timelines', running: true);
-    state.pane = PaneKind.result;
+    final task = await askText(
+      'Task for three agents, three approaches:',
+      value: badTitle == null
+          ? 'Fix the failing tests without changing the tests'
+          : 'Fix the tests broken by: $badTitle',
+    );
+    if (task == null) {
+      _note('Timelines need a task; nothing ran.', Tone.dim);
+      return;
+    }
+    final test = await askText(
+      'Test command (run in each timeline):',
+      value: backend.defaultTest() ?? '',
+    );
+    if (test == null) {
+      _note('Timelines need a test command; nothing ran.', Tone.dim);
+      return;
+    }
+    final setupAnswer = await askUser(
+      Question(
+        context: const [
+          'Dependencies are not in dmc\'s exports; a setup command installs them in each worktree.',
+        ],
+        prompt: 'Setup command (Enter to accept, delete it for none):',
+        yesNo: false,
+        value: backend.defaultSetup() ?? '',
+      ),
+    );
+    if (setupAnswer == null) return;
+    final setup = setupAnswer.trim();
+    final configured = backend.defaultAgentModel();
+    String estimate(String model) {
+      final cost = estimateTimelineCostFor(3, 20, model);
+      return cost == null
+          ? 'no price is known for $model'
+          : 'at most \$${cost.toStringAsFixed(2)} on $model';
+    }
+
+    final modelAnswer = await askUser(
+      Question(
+        context: [
+          'Estimate for 3 agents × 20 steps: ${estimate(configured ?? 'muse-spark-1.3')}'
+              '${configured == 'muse-spark-1.3-contributor' ? '' : ' (${estimate('muse-spark-1.3-contributor')})'}.',
+        ],
+        prompt:
+            'Agent model (Enter for ${configured == null ? 'Muse Code\'s default' : 'Muse Code\'s configured model'}):',
+        yesNo: false,
+        value: configured ?? '',
+      ),
+    );
+    if (modelAnswer == null) return;
+    final model = modelAnswer.trim();
+    final args = <String>[
+      'timelines',
+      task,
+      if (last != null) '--from-bisect',
+      '--test',
+      test,
+      if (setup.isNotEmpty) ...['--setup', setup],
+      // The model the user saw, passed as it is (the estimate is for it).
+      if (model.isNotEmpty) ...['--agent-model', model],
+    ];
+    await _runTimelines(TimelinesPane(task), args);
+  }
+
+  /// Runs `doc timelines` into the lanes pane.
+  Future<void> _runTimelines(TimelinesPane pane, List<String> args) async {
+    state.timelines = pane;
+    state.pane = PaneKind.timelines;
     redraw();
-    final run = await runDocAction('timelines', args);
-    _showResult('doc timelines', run);
+    final run = await runDocAction(
+      'timelines',
+      args,
+      onProgress: (event) => _timelinesProgress(pane, event),
+    );
+    _finishTimelines(pane, run);
+  }
+
+  /// A `timelines.run` progress event (from `t`, or by voice through
+  /// `doc talk`, which opens the pane on the first one).
+  void _timelinesProgress(TimelinesPane? pane, Map<String, Object?> event) {
+    if (event['type'] != 'timelines.run') return;
+    if (pane == null) {
+      final run = event['run'];
+      pane = state.timelines = TimelinesPane(
+        run is Map ? '${run['task']}' : 'timelines',
+      );
+      state.pane = PaneKind.timelines;
+    }
+    pane.update(event, DateTime.now());
+  }
+
+  void _finishTimelines(
+    TimelinesPane pane,
+    ({int code, String output, String logPath}) run,
+  ) {
+    pane
+      ..running = false
+      ..logPath = run.logPath;
+    _logs['timelines'] = run.logPath;
+    if (pane.run == null || run.code != 0) {
+      final lines = summarizeOutput(run.output, max: 1);
+      pane.stopped = lines.isEmpty
+          ? (run.code == 0
+                ? 'Nothing was started.'
+                : 'Timelines stopped (o shows why).')
+          : lines.single;
+    }
+    redraw();
+  }
+
+  void _timelinesKey(KeyEvent key) {
+    final pane = state.timelines;
+    final lanes = pane?.run?.timelines ?? const <Timeline>[];
+    switch (key.kind) {
+      case KeyKind.up when pane != null:
+        if (pane.selected > 0) pane.selected--;
+      case KeyKind.down when pane != null:
+        if (pane.selected < lanes.length - 1) pane.selected++;
+      case KeyKind.char when key.char == 'p' && pane?.current != null:
+        unawaited(_pickLane(pane!));
+      case KeyKind.char when key.char == 'c' && pane?.run != null:
+        unawaited(_cleanLanes(pane!));
+      default:
+        _globalKey(key);
+    }
+  }
+
+  /// `p`: the lane's diff and the git commands to bring it in. Nothing is
+  /// applied.
+  Future<void> _pickLane(TimelinesPane pane) async {
+    final lane = pane.current!;
+    if (pane.running) {
+      _note(
+        'The timelines are still running; pick when they finish.',
+        Tone.dim,
+      );
+      return;
+    }
+    final run = await runDocAction('timelines-pick-${lane.k}', [
+      'timelines',
+      'pick',
+      pane.run!.id,
+      '${lane.k}',
+    ]);
+    _logs['timelines'] = run.logPath;
+    if (run.code != 0) {
+      final lines = summarizeOutput(run.output, max: 1);
+      _note(
+        lines.isEmpty ? 'Could not pick it (o shows why).' : lines.single,
+        Tone.bad,
+      );
+      return;
+    }
+    pane.run!.picked = lane.k;
+    state.pager = Pager('Timeline ${lane.k}: ${lane.approach.title}', [
+      for (final line in const LineSplitter().convert(run.output))
+        line.startsWith('  git ')
+            ? plain(line, Tone.strong)
+            : line.startsWith('diff --git') || line.startsWith('@@')
+            ? plain(line, Tone.dim)
+            : diffLineOrPlain(line),
+    ]);
+    redraw();
+  }
+
+  /// `c`: remove the run's worktree folders (doc timelines clean asks).
+  Future<void> _cleanLanes(TimelinesPane pane) async {
+    if (pane.running) {
+      _note('The timelines are still running.', Tone.dim);
+      return;
+    }
+    final run = await runDocAction('timelines-clean', [
+      'timelines',
+      'clean',
+      pane.run!.id,
+    ]);
+    _logs['timelines'] = run.logPath;
+    final removed = RegExp(
+      r'^Removed ',
+      multiLine: true,
+    ).allMatches(run.output).length;
+    if (removed > 0) {
+      _note(
+        'Removed ${plural(removed, 'worktree folder')}; the branches are kept.',
+        Tone.good,
+      );
+    } else {
+      final lines = summarizeOutput(run.output, max: 1);
+      _note(lines.isEmpty ? 'Nothing was removed.' : lines.single, Tone.dim);
+    }
   }
 
   // ---- details and logs ---------------------------------------------------
@@ -1318,6 +1573,14 @@ class TuiApp {
             for (final line in item.text.split('\n')) plain(line),
           ]);
         }
+      case PaneKind.timelines:
+        final run = state.timelines?.run;
+        if (run != null) {
+          state.pager = Pager(
+            'Timelines details · ${run.id}',
+            timelinesDetails(run),
+          );
+        }
     }
   }
 
@@ -1328,7 +1591,12 @@ class TuiApp {
       PaneKind.result => state.result?.logPath,
       PaneKind.bisect => state.bisect?.logPath,
       PaneKind.lessons => _logs['lessons'],
+      PaneKind.timelines => null,
     };
+    if (state.pane == PaneKind.timelines) {
+      _openAgentLog();
+      return;
+    }
     if (path == null) {
       _note('No log for this item yet.', Tone.dim);
       return;
@@ -1336,6 +1604,36 @@ class TuiApp {
     final text = readLogFile(path);
     state.pager = Pager('Log · $path', [
       for (final line in text.split('\n')) diffLineOrPlain(line),
+    ]);
+  }
+
+  /// `o` on a lane: that agent's log (stderr) and its events, read from
+  /// the run's folder.
+  void _openAgentLog() {
+    final pane = state.timelines;
+    final lane = pane?.current;
+    if (pane == null || lane == null || pane.dir == null) {
+      final path = pane?.logPath;
+      if (path == null) {
+        _note('No agent log yet.', Tone.dim);
+        return;
+      }
+      state.pager = Pager('Log · $path', [
+        for (final line in readLogFile(path).split('\n')) diffLineOrPlain(line),
+      ]);
+      return;
+    }
+    final folder = pane.dir!;
+    final stderr = readLogFile('$folder${Platform.pathSeparator}${lane.k}.log');
+    final events = readLogFile(
+      '$folder${Platform.pathSeparator}${lane.k}.jsonl',
+    );
+    state.pager = Pager('Agent log · [${lane.k}] ${lane.approach.title}', [
+      for (final line in stderr.split('\n'))
+        if (line.trim().isNotEmpty) plain(line),
+      plain('Events (${lane.k}.jsonl):', Tone.dim),
+      for (final line in events.split('\n'))
+        if (line.trim().isNotEmpty) plain(museEventText(line)),
     ]);
   }
 

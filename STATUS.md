@@ -3,7 +3,7 @@
 The single place to see where the hackathon build stands. **Coding agents keep this file current**;
 the rules are in [AGENTS.md](AGENTS.md#session-status-statusmd).
 
-Last updated: 2026-11-03 by Claude (step 2: the TUI)
+Last updated: 2026-11-03 by Claude (step 3: TUI polish and timelines lanes)
 
 **Layout note (2026-10-31).** This repository (`EvilMetaMonkey/doc-meta-hackathon`) holds event
 work only. dmc lives in its own repository and is set up in `.deps/dmc` by
@@ -14,6 +14,40 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 `EvilMetaMonkey/dmc-meta-hackathon`.
 
 ## Done
+
+- **Step 3: TUI polish and timelines lanes** (branch `tui-polish`). Cowork's review of PR #6's
+  frames, then part H.
+  - **Summaries** (`doc summarize` and the TUI): at most 2 sentences or about 45 words, in the
+    project's terms, with any real risk. The facts sent for a summary no longer include the
+    checkpoint ID, state, agent name or counts, and the prompt forbids them and lists of what
+    was not touched. The same call returns `{title, summary}` as strict JSON, checked (length,
+    forbidden phrases, the agent's name), asked once more, then the free-text fallback. The
+    cache path is `summaries/v2/`. Lesson drafts still get the full facts.
+  - **Turns by title**; the prompt is under `d`.
+  - **One-line questions:** restore (`r`, bisect's offer, `/`, voice, `doc restore`) and redo
+    ("Undo this muse turn? README.md: put back the version from before it  [y/N]", several
+    files under `d`); bisect asks once; the brief is "From: <lesson title>" then `[y/N]`.
+    Plurals are "1 file", "2 files" everywhere, with a test over `lib/`.
+  - **The bar note** clears on the next key or after 5 s, never over help or another pane.
+  - **The detail diff:** a header per file, from the first change.
+  - **Timelines lanes (H):** `t` asks task, test, setup and model (with the estimate); `doc
+    timelines` reports the whole run through `progress`; lanes show steps, a live clock, status
+    with the stall reason, tests, the lesson once, a failing test once, then Wonder's score,
+    Planned/Did, the plan flag and ★. `p` pick (diff and git commands), `c` clean, `d`, `o`.
+    Voice timelines open the same lanes.
+  - **Real run on the Mac** (120×36 pty, a fresh `/tmp/doc-polish-demo` with the four RUNBOOK
+    turns, Doc data in its own dir): Glimmer summaries and titles for all four turns (cold start
+    95 s); the one-line restore question; bisect (the Muse turn, its errors and explanation) and
+    its one-line offer; `t` with `muse-spark-1.3-contributor`: three approaches, three lanes live,
+    all three PASS (43 s, 81 s, 61 s), Wonder recommended [3] "Complete fraction migration" (9/10);
+    `p` showed the diff and the git commands, nothing applied; `r` restored the bad turn, the
+    lesson was drafted and approved; `a` showed the brief with "From: <title>" (Glimmer cold
+    again, 120 s), and a stand-in agent got the task. Cost: Muse Code $0.0037 and $0.0066 for
+    lanes 1 and 2 (lane 3's line was below the captured frame), Wonder planner $0.030, judge
+    $0.025, plus Modal GPU time.
+  - **Found in the real run and fixed:** the "[doc] Waking Muse Glimmer…" log line came before
+    `Title:` and hid the title; Wonder's summary was cut to one line (now up to two); the pick
+    pager did not redraw (found by the fake-muse test).
 
 - **Step 2: the Doc TUI** (branch `tui`). Parts A–G and I are done; H (timelines lanes) is not:
   `t` runs `doc timelines` in the result pane.
@@ -804,15 +838,18 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
   printed it in an error message, and that appeared in one tool output in this session. Mike
   should rotate the Fireworks key.
 - **TUI (2026-11-03):**
-  - **Not done:** timelines lanes (part H); `t` shows the CLI output in the result pane.
+  - **Timelines lanes** were tried for real with all three lanes passing; the stalled and
+    timed-out lanes and `c` are covered by the fake-muse test (and `doc timelines clean` ran for
+    real in the clean-up). Bisect's headline still uses the turn's prompt, not its title.
   - **Not tested on a real Windows terminal**, which polls the size instead of SIGWINCH. The
     Windows tests run in CI.
   - **Hand-over:** stdin is paused, not closed, while an agent or editor has the terminal. It
     worked with a stand-in agent; not yet tried with Muse Code's or Claude Code's own TUI.
   - **The live microphone inside the TUI** is not tried (only a fake `rec`). `doc talk` at the
     microphone was verified by Mike on 2026-11-02.
-  - **Summaries** are the summary role's words: Glimmer's sometimes say "six exclusions" and
-    similar dmc facts. Ids are shortened on screen.
+  - **Summaries** no longer get dmc's internals (step 3), but they are still the model's words:
+    in the real run one said "Only checkout.py was modified", which is close to a list of what
+    was not touched and passed the check.
   - **Keys and dialogs:**
     - Keys pressed while a command is finishing are dropped, with a "Doc is busy" note.
     - Arrow keys pressed while waiting to talk count as Esc (as in `doc talk`).
@@ -833,7 +870,7 @@ written before that date name dmc paths such as `lib/src/…`, `test/…`, `tool
 Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
 1. Mike tries `doc ui` by hand (see the PR): Space at the real microphone, `a` with the real Muse
-   Code, `e` with his editor. Then decide on timelines lanes (part H) if there is time.
+   Code, `e` with his editor, and `t` on `muse-wonder-1.0` (the video's model).
 2. Record the video from demo/RUNBOOK.md (Mike); the TUI version is in "On camera, in the TUI".
 3. Add the video's link to README.md's "▶ 3-minute demo" line (it says `<video link>` now).
 4. Submit by Nov 4, 9:00 PM ET.
@@ -852,6 +889,13 @@ Submissions are due Nov 4 at 9:00 PM ET. The build started on Oct 26.
 
 Newest first. One entry per session: date, agent, what changed, and anything left half-done.
 
+- 2026-11-03 · Claude · Step 3, TUI polish (branch `tui-polish`): plain summaries with titles
+  (strict JSON, one retry, fallback, cache v2), turns by title, one-line restore/redo/brief
+  questions, plurals, bar-note hygiene, the per-file diff preview, and timelines lanes (H) with
+  pick, clean, details and agent logs. A real pty run of the loop on a fresh demo repo; Mike's
+  `/tmp/doc-demo` and Muse hooks (installed at 17:01, hash 9dba6c0916730b9d) were left as found.
+  Gates: a clean setup_dmc 36/36; dmc analyzer clean, 236 tests, 3 contract tests; Doc analyzer
+  clean, 255 tests.
 - 2026-11-03 · Claude · Step 2, the TUI (branch `tui`): `doc ui` parts A–G (shell, turns and
   details, Space to talk, restore/redo, bisect pane, lessons and start agent, splash/help/empty
   states) and dmc patch 0036 (splash cleanup). Real pty runs of the whole loop on the Mac fixed

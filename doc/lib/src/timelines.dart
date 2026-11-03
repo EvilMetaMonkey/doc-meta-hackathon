@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'summarize.dart';
+import 'plural.dart';
 
 /// Parallel timelines, the deterministic part: validating the planner's
 /// approaches, syncing a worktree to a base export, the run state, Muse
@@ -12,6 +13,16 @@ import 'summarize.dart';
 const int timelinePlanMaxWords = 120;
 
 /// One approach the planner proposed.
+/// Muse Code's step-limit reason, "… within 8 step(s)" (its words; Doc
+/// shows them as "8 steps", see [plainPlurals]).
+final RegExp stepLimitReason = RegExp(r'within \d+ step');
+
+/// "8 step(s)" in another tool's message, as Doc writes it: "8 steps".
+String plainPlurals(String text) => text.replaceAllMapped(
+  RegExp(r'\b(\d+) ([a-z]+)\(s\)'),
+  (m) => plural(int.parse(m[1]!), m[2]!),
+);
+
 class TimelineApproach {
   final String title;
   final String plan;
@@ -331,7 +342,7 @@ class MuseOutcome {
     this.finalText = '',
   });
 
-  bool get stepLimit => reason?.contains('step(s)') ?? false;
+  bool get stepLimit => reason != null && stepLimitReason.hasMatch(reason!);
 }
 
 /// Seconds without a new Muse Code event before Doc stops an agent.
@@ -458,7 +469,7 @@ MuseOutcome parseMuseEvents(Iterable<String> lines) {
   }
   return MuseOutcome(
     terminal: terminal,
-    reason: reason,
+    reason: reason == null ? null : plainPlurals(reason),
     model: model,
     steps: calls ?? progress.steps,
     inputTokens: input,
@@ -839,7 +850,9 @@ String _clock(double seconds) {
 String _statusText(Timeline t) => switch (t.status) {
   TimelineStatus.done => 'done',
   TimelineStatus.failed =>
-    t.reason != null && t.reason!.contains('step(s)') ? 'step limit' : 'failed',
+    t.reason != null && stepLimitReason.hasMatch(t.reason!)
+        ? 'step limit'
+        : 'failed',
   TimelineStatus.timedOut => 'timed out',
   TimelineStatus.stopped => 'stopped',
   TimelineStatus.stalled => 'stalled',
@@ -873,9 +886,9 @@ List<String> timelineComparison(TimelineRun run, {int tailLines = 8}) {
     lines
       ..add('[${t.k}] ${t.approach.title}')
       ..add(
-        '    agent: ${_statusText(t)}, ${t.steps} step(s), ${_clock(t.seconds)}'
+        '    agent: ${_statusText(t)}, ${plural(t.steps, 'step')}, ${_clock(t.seconds)}'
         '${t.costUsd == null ? '' : ', \$${t.costUsd!.toStringAsFixed(4)}'}'
-        '${t.reason != null && t.status != TimelineStatus.done ? ' (${t.reason})' : ''}',
+        '${t.reason != null && t.status != TimelineStatus.done ? ' (${plainPlurals(t.reason!)})' : ''}',
       )
       ..add(
         '    files: ${t.files.isEmpty ? 'no changes' : t.files.map((f) => f.added == null ? '${f.path} (binary)' : '${f.path} +${f.added} −${f.removed}').join(', ')}'
@@ -953,7 +966,7 @@ String timelineJudgeMessage(TimelineRun run, Map<int, String> diffs) {
       ..writeln('=== Timeline ${t.k}: ${t.approach.title}')
       ..writeln('Plan: ${t.approach.plan}')
       ..writeln(
-        'Agent: ${t.status.name}${t.reason == null ? '' : ' (${t.reason})'}, ${t.steps} step(s), ${t.seconds.round()} s',
+        'Agent: ${t.status.name}${t.reason == null ? '' : ' (${plainPlurals(t.reason!)})'}, ${plural(t.steps, 'step')}, ${t.seconds.round()} s',
       )
       ..writeln(
         'Tests: ${test == null
@@ -1229,7 +1242,7 @@ TimelineJudgment parseTimelineJudgment(String content, TimelineRun run) {
   final missing = byK.keys.where((k) => !entries.any((e) => e.k == k));
   if (missing.isNotEmpty) {
     throw TimelineJudgeRefused(
-      'The ranking leaves out timeline(s) ${missing.join(', ')}.',
+      'The ranking leaves out ${missing.length == 1 ? 'timeline' : 'timelines'} ${missing.join(', ')}.',
     );
   }
   final recommended = json['recommended'];

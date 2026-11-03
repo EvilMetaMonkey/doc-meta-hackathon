@@ -123,7 +123,7 @@ void main() {
     expect(text, contains('  warn  Microphone: no rec (SoX) or ffmpeg'));
     expect(text, contains('  warn  Muse Code: not found'));
     expect(text, contains('  warn  Claude Code: not found'));
-    expect(text, contains('failure(s).'));
+    expect(text, contains('failures.'));
   });
 
   test('set up: hooks via dmc JSON, keys never printed, the agent model and '
@@ -273,7 +273,7 @@ void main() {
     expect(
       '$out',
       contains(
-        'warn  Hooks (Claude Code, local): missing UserPromptSubmit, Stop, StopFailure, SessionEnd; 1 hook(s) from another dmc build',
+        'warn  Hooks (Claude Code, local): missing UserPromptSubmit, Stop, StopFailure, SessionEnd; 1 hook from another dmc build',
       ),
     );
     expect(

@@ -87,7 +87,7 @@ doc status                    # four checkpoints, both agents
 
 | # | Step | Command | Time |
 |---|---|---|---|
-| 1 | **Find it** | `doc bisect --test "python3 -m unittest -q"`, then **n** at "Restore to before this turn?" | about 2 s |
+| 1 | **Find it** | `doc bisect --test "python3 -m unittest -q"`, then **n** at "Undo this muse turn? money.py: put back the version from before it  [y/N]" | about 2 s |
 | 2 | **Fix it** | `doc timelines "fix the failing tests without changing the tests" --from-bisect --max-steps 10`, then **y** | about 70 s (3 agents in parallel, then judging) |
 | 3 | Wonder's advice | (printed by step 2, under the comparison) | none |
 | 4 | Pick | `doc timelines pick <run-id> <k>` (Wonder's pick, or yours) | under 1 s |
@@ -126,24 +126,48 @@ What to point at:
 
 ## On camera, in the TUI (`doc ui`)
 
-The same loop in one full-screen window. Make the terminal **120×36** (the frames in the PR
-were captured at that size; below 80×24 Doc asks for a bigger window). Run `doc ui` (or plain
-`doc`) in `/tmp/doc-demo`. The splash shows the car for about a second; any key skips it.
+The same loop in one full-screen window, end to end. Make the terminal **120×36** (the frames
+in the PR were captured at that size; below 80×24 Doc asks for a bigger window). Pre-run the four
+agent turns above, and warm Glimmer (`doc doctor --check`) about 2 minutes before recording.
+
+**Opening shot: raw dmc beside Doc.** Split the terminal in two panes in `/tmp/doc-demo`, and
+use the Muse turn that changed `apply_discount` (the third line of `"$DMC_BIN" checkpoint list`):
+
+```sh
+"$DMC_BIN" checkpoint show <muse cp>     # left: ids, status, counts, hashes: what dmc records
+doc summarize <muse cp>                  # right: "Title: …" and two plain sentences
+```
+
+Say: "dmc records everything; Doc tells you what it means." Then close the left pane and run
+`doc ui` (or plain `doc`). The splash shows the car for about a second; any key skips it.
 
 | # | Step | Keys | What shows |
 |---|---|---|---|
-| 1 | The turns | ↑↓ | Four turns, newest first. The detail pane shows who and when, the plain-English summary (Glimmer; "summarizing…" first), the files with +/− counts and the start of the diff. |
-| 2 | **Find it** | **b**, Enter (test), Enter (setup) | The strip fills in PASS / FAIL per probe, then "Turn 2 broke the tests: In money.py, change apply_discount …", the file, the failing test's name and error line, and Muse Spark's explanation. The turn gets a red ✗. |
-| 3 | Restore? | **n** (for the video: fix it instead) | "Restore to before this turn? It undoes cp_… through dmc. [y/N]" |
-| 4 | **Fix it** | **t**, Enter | `doc timelines … --from-bisect` in the result pane; its one question ("Run 3 Muse Code agents …? [y/N]") is a dialog. Lanes come in the next step. |
-| 5 | **Remember it** | **r** on the bad turn, **y**, then the lesson offer and "What went wrong?" | dmc's preview, one question, the restore, then the lesson draft. The turn shows ↺ undone. |
-| 6 | Approve | **l**, **y** on the draft | The lessons pane; a draft that still says "Not stated" is refused with the exact fix. |
-| 7 | The brief | **a**, Enter (muse-code), the task, Enter (files) | The matched brief, one question, then Muse Code opens with it. When it exits, the TUI comes back. |
-| 8 | **Hey Doc** | **Space**, say "What's the status?", **Space** | The bar shows the live transcript, then "I heard … → I'll run: doc status. Run it? [y/N]"; **y**. |
+| 1 | The turns | ↑↓ | Four turns, newest first, each by a short title once Glimmer has summarized it ("summarizing…" first; titles are cached). The detail pane: who and when, the title, two sentences, the files with +/− and the diff from the first change. |
+| 2 | **Find it** | **b**, type `python3 -m unittest -q` (prefilled once a bisect has run), Enter, Enter (setup) | The strip fills in PASS / FAIL per probe, then "Turn 2 broke the tests: …", the file, the failing test's name and error line, and Muse Spark's explanation. The turn gets a red ✗. |
+| 3 | The offer | **n** | One line: "Undo this muse turn? money.py: put back the version from before it  [y/N]". For the video, fix it instead. |
+| 4 | **Fix it** | **t**, Enter ×3, then the model, Enter | The task is prefilled ("Fix the tests broken by: <title>"), then the test, the setup and the agent model with its estimate (Enter keeps Muse Code's configured `muse-wonder-1.0`; for rehearsals type `muse-spark-1.3-contributor`). |
+| 5 | The cost | **y** | One line: "Run 3 Muse Code agents (<model>) in separate worktrees (… est. cost ≤ $…)? [y/N]". The plan and the estimate's working are under `d`. |
+| 6 | Three lanes | (watch) | One lane per approach: steps and a live clock, running / done / stalled (with why) / timed out, then tests PASS or FAIL. A lesson, if one matched, shows once above the lanes ("Using lesson: …"). A failing test is named once. |
+| 7 | Wonder's advice | (watch) | "Asking Muse Wonder to judge…", then in the same lanes: the score, "Planned: … / Did: …", "didn't follow its plan" in yellow, and ★ recommended. Point at Planned / Did. |
+| 8 | Pick | ↑↓ to the ★ lane, **p** | The diff, coloured and scrollable, and the `git apply` commands. Nothing is applied; Esc closes it. |
+| 9 | **Remember it** | Esc, ↑↓ to the ✗ turn, **r**, **y**, **y**, the note, Enter | The one-line restore question, the restore through dmc, the lesson offer and "What went wrong?" (say: "checkout.py and the tests still pass percents like 10 and 25, so every discount raised ValueError"). The turn shows ↺ undone, and the tests pass again. |
+| 10 | Approve | **l**, **y** on the draft | The lessons pane; a draft that still says "Not stated" is refused with the exact fix. |
+| 11 | The brief | **a**, Enter (muse-code), the task, Enter (files) | The brief, "From: <lesson title>", then "Add this to the agent's first prompt? [y/N]"; **y** opens Muse Code with it. When it exits, the TUI comes back. |
+| 12 | **Hey Doc** | **Space**, say "What's the status?", **Space** | The bar shows the live transcript, then "I heard … → I'll run: doc status. Run it? [y/N]"; **y**. |
 
-`d` shows details (full diff, ids, times, model and cost), `o` the raw log of that action, `?`
-every key, and `:` runs any `doc …` command (or a read-only `dmc …` one) into a result pane.
-`q` quits; Ctrl-C also quits and always gives the terminal back.
+Step 8 or step 9 fixes the code, not both: the restore puts `money.py` back, so the picked patch
+would no longer apply. To ship the timeline's fix instead, run the two `git apply` lines from
+`p` in a second pane, skip `r`, and draft the lesson from the command bar (`:` then `lesson
+draft <muse cp> --note "…"`).
+
+After timelines, `c` in the lanes pane removes the run's worktree folders (it asks first; the
+branches stay).
+
+`d` shows details (the full diff, ids, times, the model, tokens and cost; in the lanes, worktrees
+and branches too), `o` the raw log of that action (in the lanes, the agent's own log), `?` every
+key, and `:` runs any `doc …` command (or a read-only `dmc …` one) into a result pane. `q` quits;
+Ctrl-C also quits and always gives the terminal back.
 
 ### "Hey Doc" variants (push to talk)
 
@@ -208,6 +232,7 @@ Code's `~/.config/muse/settings.json` goes back to its exact bytes.
 | `doc bisect` (4 probes and the explanation) | 2 s | Baseten $0.0028 |
 | `doc timelines --from-bisect` (3 agents on `muse-wonder-1.0`, 7/7/10 steps, then judging) | 66 s (agents 48 s) | Muse Code $0.81, Wonder planner $0.026, Wonder judge $0.026 |
 | the same with `--agent-model muse-spark-1.3-contributor` (rehearsal, 6/8/3 steps; one agent hit a `server_error`) | 66 s (agents 51 s) | Muse Code $0.012, Wonder planner $0.023, Wonder judge $0.024 |
+| `doc ui` timelines (`t`, 2026-11-02, `muse-spark-1.3-contributor`, 7/8/5 steps, all three PASS) | agents 43 / 81 / 61 s, then judging | Muse Code $0.0037 + $0.0066 + lane 3, Wonder planner $0.030, judge $0.025 |
 | `doc timelines pick` | under 1 s | none |
 | `git apply`, `python3 -m unittest -v` | under 1 s | none |
 | `doc lesson draft` | 2 s | Baseten $0.0029 |

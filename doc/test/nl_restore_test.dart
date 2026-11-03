@@ -162,7 +162,7 @@ void main() {
             isA<NlRestoreRefused>().having(
               (e) => e.message,
               'message',
-              contains('the list has 3 checkpoint(s) (1-3)'),
+              contains('the list has 3 checkpoints (1-3)'),
             ),
           ),
           reason: '$pick',

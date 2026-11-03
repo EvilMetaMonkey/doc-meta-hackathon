@@ -2,7 +2,11 @@
 /// build it from dmc's JSON and from Doc's command output.
 library;
 
+import 'dart:convert';
+
 import '../doctor_command.dart';
+import '../plural.dart';
+import '../timelines.dart';
 import 'text.dart';
 
 /// One checkpoint in the turns list, from `dmc checkpoint list --json`.
@@ -149,6 +153,32 @@ List<FileChange> filesFromDiff(String diff) {
   return files;
 }
 
+/// The diff for the detail pane: a dim header per file ("money.py"), then
+/// its lines from the first change (leading context and hunk markers are
+/// skipped), at most [max] lines in all.
+List<Line> diffPreview(String diff, int max) {
+  final header = RegExp(r'^--- (.+) \(([^)]+)\)$');
+  final rows = <Line>[];
+  var leading = true;
+  for (final line in diff.trimRight().split('\n')) {
+    if (rows.length >= max) break;
+    final match = header.firstMatch(line);
+    if (match != null) {
+      rows.add(plain(match[1]!, Tone.dim));
+      leading = true;
+      continue;
+    }
+    final change =
+        (line.startsWith('+') && !line.startsWith('+++')) ||
+        (line.startsWith('-') && !line.startsWith('---')) ||
+        line.startsWith('(');
+    if (leading && !change) continue;
+    leading = false;
+    rows.add(diffLine(line));
+  }
+  return rows;
+}
+
 /// A diff line coloured: red `-`, green `+`, dim headers and context.
 Line diffLine(String line) {
   if (line.startsWith('--- ') || line.startsWith('@@')) {
@@ -161,6 +191,8 @@ Line diffLine(String line) {
 
 /// What the detail pane knows about one turn.
 class TurnDetail {
+  /// A short title for the turn, from the same call as [summary].
+  String? title;
   String? summary;
 
   /// The model/tokens/cost line (shown under `d`).
@@ -176,17 +208,29 @@ class TurnDetail {
   List<FileChange> get files => diff == null ? const [] : filesFromDiff(diff!);
 }
 
-/// The summary text and its footer from `doc summarize` output: the
-/// answer, a blank line, then "(provider model; … )".
-({String text, String? footer}) parseSummaryOutput(String output) {
-  final lines = output.trimRight().split('\n');
+/// The title, summary text and footer from `doc summarize` output:
+/// "Title: …" (when the model gave one), the answer, a blank line, then
+/// "(provider model; … )". `[doc] ` log lines are skipped.
+({String? title, String text, String? footer}) parseSummaryOutput(
+  String output,
+) {
+  // Doc's own log lines ("[doc] Waking Muse Glimmer…") share the output.
+  final lines = [
+    for (final line in output.trim().split('\n'))
+      if (!line.startsWith('[doc] ')) line,
+  ];
   String? footer;
+  String? title;
   if (lines.isNotEmpty &&
       lines.last.startsWith('(') &&
       lines.last.endsWith(')')) {
     footer = lines.removeLast();
   }
-  return (text: lines.join('\n').trim(), footer: footer);
+  if (lines.isNotEmpty && lines.first.startsWith('Title: ')) {
+    title = lines.removeAt(0).substring('Title: '.length).trim();
+    if (title.isEmpty) title = null;
+  }
+  return (title: title, text: lines.join('\n').trim(), footer: footer);
 }
 
 /// Header facts, from the same checks as `doc doctor` (no model calls).
@@ -347,6 +391,85 @@ class BisectPane {
   BisectPane(this.test, this.setup, this.strip);
 }
 
+/// `t`: three agents, three approaches, one lane each. Filled from
+/// `doc timelines`'s progress events (the run as saved in run.json).
+class TimelinesPane {
+  final String task;
+  TimelineRun? run;
+
+  /// The run's folder in Doc's data dir (agent logs live there).
+  String? dir;
+  List<String> lessonTitles = const [];
+
+  /// `planning`, then the run's phases: `planned`, `declined`, `running`,
+  /// `judging`, `done`, `interrupted`.
+  String phase = 'planning';
+  bool running = true;
+  int selected = 0;
+
+  /// When each lane was first seen running (for its live clock).
+  final Map<int, DateTime> startedAt = {};
+
+  /// Why the run ended early (the command's own words), if it did.
+  String? stopped;
+  String? logPath;
+
+  TimelinesPane(this.task);
+
+  /// Apply one `timelines.run` progress event.
+  void update(Map<String, Object?> event, DateTime now) {
+    final json = event['run'];
+    if (json is! Map) return;
+    run = TimelineRun.fromJson(json);
+    dir = event['dir'] as String? ?? dir;
+    lessonTitles = [
+      for (final t in (event['lessonTitles'] as List? ?? const [])) '$t',
+    ];
+    phase = event['phase'] as String? ?? phase;
+    for (final t in run!.timelines) {
+      if (t.status == TimelineStatus.running) {
+        startedAt.putIfAbsent(t.k, () => now);
+      }
+    }
+    if (run!.timelines.isNotEmpty) {
+      selected = selected.clamp(0, run!.timelines.length - 1);
+    }
+  }
+
+  Timeline? get current =>
+      run == null || run!.timelines.isEmpty ? null : run!.timelines[selected];
+
+  TimelineJudgment? get judgment =>
+      run?.judgment == null ? null : TimelineJudgment.fromJson(run!.judgment!);
+
+  /// A lane's elapsed seconds: live while it runs, then the agent's own.
+  double seconds(Timeline t, DateTime now) {
+    final started = startedAt[t.k];
+    if (t.status == TimelineStatus.running && started != null) {
+      return now.difference(started).inMilliseconds / 1000;
+    }
+    return t.seconds;
+  }
+}
+
+/// The failing test's name in a test tail ("test_checkout_total"), or the
+/// first essential line.
+String? failingTestName(String tail) {
+  for (final line in tail.split('\n')) {
+    final text = line.trim();
+    final unittest = RegExp(r'^(?:FAIL|ERROR): (\S+)').firstMatch(text);
+    if (unittest != null) return unittest[1];
+    final pytest = RegExp(r'^FAILED (\S+)').firstMatch(text);
+    if (pytest != null) return pytest[1];
+    final dart = RegExp(
+      r'^\d\d:\d\d \+\d+.*-\d+: (.+?)(?: \[E\])?$',
+    ).firstMatch(text);
+    if (dart != null) return dart[1];
+  }
+  final essentials = failureEssentials(tail, max: 1);
+  return essentials.isEmpty ? null : essentials.first;
+}
+
 /// A failing test's name and its expected/actual lines, without setup or
 /// runner noise. Understands unittest/pytest tracebacks, `flutter test`
 /// and `dart test` output; falls back to the last error line.
@@ -404,7 +527,7 @@ class LessonsPane {
       items.isEmpty ? null : items[selected.clamp(0, items.length - 1)];
 }
 
-enum PaneKind { turns, result, bisect, lessons }
+enum PaneKind { turns, result, bisect, lessons, timelines }
 
 /// A question from a command: the lines that led up to it, then one line.
 class Question {
@@ -415,6 +538,27 @@ class Question {
   /// `[y/N]` questions take y/n; others take a line of text.
   final bool yesNo;
   String value;
+
+  /// `d` shows the context of a one-line question.
+  bool showDetails = false;
+
+  /// A restore or redo question says everything on its one line ("Undo
+  /// this muse turn? README.md: put back …  [y/N]"); its per-file list
+  /// stays under `d`. So does timelines' "Run 3 Muse Code agents … (est.
+  /// cost …)? [y/N]", with the plan and the estimate's working.
+  bool get oneLine =>
+      yesNo &&
+      RegExp(
+        r'^(Undo|Redo|Go back to before) |^Run \d+ Muse Code agents',
+      ).hasMatch(prompt);
+
+  /// What `d` shows in a one-line question.
+  String get detailsHint => prompt.startsWith('Run ')
+      ? 'd: the plan and the estimate'
+      : 'd: every file';
+
+  /// The context shown in the dialog.
+  List<String> get shownContext => oneLine && !showDetails ? const [] : context;
 
   Question({
     required this.context,
@@ -457,6 +601,10 @@ class TuiState {
   ActionResult? result;
   BisectPane? bisect;
   LessonsPane? lessons;
+  TimelinesPane? timelines;
+
+  /// The clock for elapsed times (set before each draw).
+  DateTime now = DateTime.now();
 
   Question? question;
   Pager? pager;
@@ -479,4 +627,83 @@ class TuiState {
 
   TuiTurn? get currentTurn =>
       turns.isEmpty ? null : turns[selected.clamp(0, turns.length - 1)];
+}
+
+/// One Muse Code `--json` event, short: its type and any text it carries.
+String museEventText(String line) {
+  try {
+    final event = jsonDecode(line);
+    if (event is! Map) return line;
+    final type = '${event['payload_type'] ?? event['type'] ?? '?'}';
+    final payload = event['payload'];
+    String? detail;
+    if (payload is Map) {
+      for (final key in const ['text', 'reason', 'message']) {
+        if (payload[key] is String && (payload[key] as String).isNotEmpty) {
+          detail = payload[key] as String;
+          break;
+        }
+      }
+      final inner = payload['event'];
+      if (detail == null && inner is Map && inner['task_kind'] is String) {
+        detail = '${inner['task_kind']}';
+      }
+    }
+    return detail == null ? type : '$type: ${detail.replaceAll('\n', ' ')}';
+  } on FormatException {
+    return line;
+  }
+}
+
+/// `d` in the timelines pane: models, tokens and costs, worktree paths and
+/// branches; lesson IDs and the base.
+List<Line> timelinesDetails(TimelineRun run) {
+  String cost(Object? usd) =>
+      usd is num ? '\$${usd.toStringAsFixed(4)}' : 'cost unknown';
+  String model(Map<String, Object?>? call) => call == null
+      ? '(none)'
+      : '${call['provider']} ${call['model']}; ${call['promptTokens']} in / '
+            '${call['completionTokens']} out; ${cost(call['costUsd'])}';
+  return [
+    plain('Run ${run.id} (${run.status})', Tone.strong),
+    plain('Task: ${run.task}'),
+    plain('Tests: ${run.test}'),
+    plain('Setup: ${run.setup ?? '(none)'}'),
+    plain(
+      'Base: ${run.baseCheckpoint} ${run.baseState}'
+      '${run.baseCommit == null ? '' : ' (commit ${run.baseCommit!.substring(0, 12)})'}',
+    ),
+    if (run.lessons.isNotEmpty) plain('Lessons: ${run.lessons.join(', ')}'),
+    plain('Planner: ${model(run.planner)}'),
+    if (run.judgment != null) plain('Judge: ${model(run.judgment)}'),
+    const [],
+    for (final t in run.timelines) ...[
+      plain('[${t.k}] ${t.approach.title}', Tone.strong),
+      plain('    ${t.approach.plan}', Tone.dim),
+      plain(
+        '    agent: ${t.status.name}${t.reason == null ? '' : ' (${plainPlurals(t.reason!)})'}, '
+        '${plural(t.steps, 'step')}, ${t.seconds.round()} s',
+      ),
+      plain(
+        '    model: ${t.model ?? 'unknown'}; ${t.inputTokens} in (${t.cachedTokens} cached) / '
+        '${t.outputTokens} out; ${cost(t.costUsd)}',
+      ),
+      plain('    worktree: ${t.worktree}'),
+      plain('    branch: ${t.branch}'),
+      if (t.files.isNotEmpty)
+        plain(
+          '    files: ${[for (final f in t.files) '${f.path} +${f.added} −${f.removed}'].join(', ')}',
+        ),
+      if (t.test != null) ...[
+        plain(
+          '    tests: ${t.test!.passed ? 'PASS' : 'FAIL'} (${t.test!.seconds.toStringAsFixed(1)} s)',
+          t.test!.passed ? Tone.good : Tone.bad,
+        ),
+        if (!t.test!.passed)
+          for (final line in failureEssentials(t.test!.tail))
+            plain('      $line', Tone.dim),
+      ],
+      const [],
+    ],
+  ];
 }

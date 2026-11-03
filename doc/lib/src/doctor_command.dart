@@ -10,6 +10,7 @@ import 'model_router.dart';
 import 'talk_command.dart';
 import 'timelines.dart';
 import 'timelines_command.dart';
+import 'plural.dart';
 
 /// The dmc Doc found, quoted, to start a fix line: never a bare `dmc`,
 /// which on macOS can be Apple's `/usr/bin/dmc`.
@@ -57,7 +58,7 @@ Future<int> runDoctorCommand(DocContext context) async {
   final failures = lines.where((l) => l.level == DoctorLevel.fail).length;
   final warnings = lines.where((l) => l.level == DoctorLevel.warn).length;
   out.writeln(
-    '${lines.length - failures - warnings} ok, $warnings warning(s), $failures failure(s).',
+    '${lines.length - failures - warnings} ok, ${plural(warnings, 'warning')}, ${plural(failures, 'failure')}.',
   );
   return failures > 0 ? 1 : 0;
 }
@@ -173,7 +174,7 @@ Future<List<DoctorLine>> doctorChecks(
         add(
           DoctorLevel.warn,
           'Hooks ($name, $scope): ${missing.isEmpty ? '' : 'missing ${missing.join(', ')}'}'
-              '${others.isEmpty ? '' : '${missing.isEmpty ? '' : '; '}${others.length} hook(s) from another dmc build'}',
+              '${others.isEmpty ? '' : '${missing.isEmpty ? '' : '; '}${plural(others.length, 'hook')} from another dmc build'}',
           '${dmcFixCommand(dmc.executable)} disable --apply, then ${dmcFixCommand(dmc.executable)} hooks install --agent $agent --apply',
         );
       }

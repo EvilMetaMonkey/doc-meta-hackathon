@@ -221,7 +221,7 @@ void main() {
       contains('  Turn 3 of 4 · manual · Use hmac in auth · files: auth.py\n'),
     );
     expect(text, contains('Plan: go back to before ${ids[1]}'));
-    expect(text, contains('(3 step(s), newest first)'));
+    expect(text, contains('(3 steps, newest first)'));
     expect(text, contains('  1. ${ids[3]}'));
     expect(text, contains('  3. ${ids[1]}'));
     expect(
@@ -235,8 +235,13 @@ void main() {
       ),
     );
     expect(text, contains(RegExp(r'notes\.md\s+\+0 −1\s+delete it')));
-    expect(text, contains('Apply this restore (3 step(s), 3 file(s))? [y/N]'));
-    expect(text, contains('Restored 3 file(s) in 3 step(s) through dmc.'));
+    expect(
+      text,
+      contains(
+        'Go back to before this change (3 steps undone)? 3 files change (README.md, auth.py, +1)  [y/N]',
+      ),
+    );
+    expect(text, contains('Restored 3 files in 3 steps through dmc.'));
     expect(text, contains('Draft saved:'));
     // Newest first, and the working copy is back to before turn 2.
     expect(await restoredInOrder(), [ids[3], ids[2], ids[1]]);
@@ -254,7 +259,7 @@ void main() {
     // The lesson is drafted from the oldest step, with the rest as context.
     final draft = prompt(baseten.requests.single);
     expect(draft, contains('Checkpoint ${ids[1]}'));
-    expect(draft, contains('also undid 2 later checkpoint(s)'));
+    expect(draft, contains('also undid 2 later checkpoints'));
   });
 
   test('undo_turn restores that one checkpoint only', () async {
@@ -294,7 +299,7 @@ void main() {
       contains('That answer was not usable'),
     );
     expect('$out', contains('Doc refused the model\'s answer'));
-    expect('$out', contains('the list has 4 checkpoint(s) (1-4)'));
+    expect('$out', contains('the list has 4 checkpoints (1-4)'));
     expect(tree(), before);
   });
 
@@ -353,7 +358,7 @@ void main() {
       expect(text, contains('  2. '));
       expect(text, contains('     ${ids[3]}'));
       expect(text, contains('Cancelled. Nothing was changed.'));
-      expect(text, isNot(contains('Apply this restore')));
+      expect(text, isNot(contains('Go back to before this change')));
       expect(tree(), before);
 
       // A pick, then --yes answers the apply question.
@@ -380,7 +385,7 @@ void main() {
     final text = '$out';
     expect(text, contains('dmc will not restore this plan as it stands:'));
     expect(text, contains('step 2 (${ids[2]}): README.md: workspace_drift'));
-    expect(text, isNot(contains('Apply this restore')));
+    expect(text, isNot(contains('Go back to before this change')));
     expect(tree(), before);
     expect(await restoredInOrder(), isEmpty);
   });
@@ -488,14 +493,17 @@ void main() {
     expect((result['result'] as Map)['status'], 'applied');
     expect(((result['result'] as Map)['applied'] as List), hasLength(3));
     // Questions and progress went to stderr.
-    expect('$err', contains('Apply this restore'));
+    expect('$err', contains('Go back to before this change (3 steps undone)?'));
   });
 
   test('a checkpoint id keeps the checkpoint flow', () async {
     final ids = await history();
     answers.add('n');
     expect(await doc(['restore', ids[3]]), 0, reason: '$err');
-    expect('$out', contains('Checkpoint ${ids[3]} (closed): Add notes'));
-    expect('$out', contains('Restore these files? [y/N]'));
+    expect('$out', isNot(contains('(closed)')));
+    expect(
+      '$out',
+      contains('Undo this change? 2 files change (auth.py, notes.md)  [y/N]'),
+    );
   });
 }

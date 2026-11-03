@@ -10,6 +10,8 @@ import 'lesson_commands.dart';
 import 'model_client.dart';
 import 'model_router.dart';
 import 'nl_restore.dart';
+import 'plural.dart';
+import 'restore_command.dart';
 
 /// Room for reasoning plus the small JSON answer.
 const int nlRestoreMaxTokens = 2000;
@@ -128,7 +130,7 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
       'Would send to ${prepared.route.provider.id} (${prepared.route.model}) at '
       '${prepared.route.provider.baseUrl}/chat/completions. Nothing was sent.',
     );
-    say('Redacted: ${prepared.redactionCount} item(s)');
+    say('Redacted: ${plural(prepared.redactionCount, 'item')}');
     if (json) {
       report['prompt'] = prepared.body;
       return finish(0, 'promptShown');
@@ -211,7 +213,7 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
   };
   final footer =
       '${call.result.provider} ${call.result.model}; $promptTokens in / $completionTokens out; '
-      '\$${cost.toStringAsFixed(6)}; $redactions item(s) redacted'
+      '\$${cost.toStringAsFixed(6)}; ${plural(redactions, 'item')} redacted'
       '${call.fellBackFrom == null ? '' : '; fell back from ${call.fellBackFrom}'}';
   if (plan == null) {
     say('Doc refused the model\'s answer: $problem');
@@ -297,7 +299,7 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
 
   say('');
   say(
-    'Plan: ${_modeText(plan.mode, plan.target)} (${steps.length} step(s), newest first):',
+    'Plan: ${_modeText(plan.mode, plan.target)} (${plural(steps.length, 'step')}, newest first):',
   );
   for (var i = 0; i < steps.length; i++) {
     final c = steps[i];
@@ -395,8 +397,25 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
   }
 
   // 5. One confirmation, then dmc's journaled restore, step by step.
+  final turn = turnPhrase(plan.target.agent);
+  final lead = steps.length == 1
+      ? 'Undo $turn?'
+      : plan.mode == NlRestoreMode.goBackBefore
+      ? 'Go back to before $turn (${plural(steps.length, 'step')} undone)?'
+      : 'Undo $turn and ${plural(steps.length - 1, 'later step')}?';
   if (!await confirm(
-    'Apply this restore (${steps.length} step(s), ${changing.length} file(s))? [y/N] ',
+    restoreQuestion(lead, [
+      for (final file in changing)
+        (
+          path: file.path,
+          action: steps.length == 1
+              ? file.description.replaceFirst(
+                  RegExp(r'from before step \d+$'),
+                  'from before it',
+                )
+              : file.description,
+        ),
+    ]),
     byDefault: false,
   )) {
     say('Nothing was changed.');
@@ -486,7 +505,7 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
     });
   }
   say(
-    'Restored ${changing.length} file(s) in ${steps.length} step(s) through dmc.',
+    'Restored ${plural(changing.length, 'file')} in ${plural(steps.length, 'step')} through dmc.',
   );
   final appliedJson = [
     for (final a in applied)
@@ -516,7 +535,7 @@ Future<int> runNaturalRestore(DocContext context, String request) async {
   final related = later.isEmpty
       ? null
       : [
-          'This restore also undid ${later.length} later checkpoint(s), newest first:',
+          'This restore also undid ${plural(later.length, 'later checkpoint')}, newest first:',
           for (final c in later)
             '- ${c.who}: ${c.modelLabel}; changed: ${c.fileList}',
         ].join('\n');

@@ -12,6 +12,7 @@ import 'package:test/test.dart';
 
 import 'support/dmc_fixture.dart';
 import 'support/fake_provider.dart';
+import 'support/fake_tui.dart';
 
 /// Passes when state.txt says "good".
 final String goodTest = Platform.isWindows
@@ -377,7 +378,7 @@ void main() {
       {'path': 'state.txt', 'added': 1, 'removed': 1},
     ]);
     expect((timelines[1]['test'] as Map)['passed'], isFalse);
-    expect(timelines[1]['reason'], contains('2 step(s)'));
+    expect(timelines[1]['reason'], contains('2 steps'));
     expect((timelines[2]['test'] as Map)['passed'], isFalse);
     // Killed before run.usage: the steps are counted from the events.
     expect(timelines[2]['steps'], 4);
@@ -389,16 +390,13 @@ void main() {
     expect(text, contains('[timeline 1] running: Put the value back'));
     expect(text, contains('[timeline 2] stopped at the step limit'));
     expect(text, contains('[timeline 3] timed out'));
-    expect(
-      text,
-      contains('[1] Put the value back\n    agent: done, 3 step(s)'),
-    );
+    expect(text, contains('[1] Put the value back\n    agent: done, 3 steps'));
     expect(text, contains('    files: state.txt +1 −1\n    tests: PASS'));
     expect(
       text,
-      contains('[2] Rewrite the module\n    agent: step limit, 2 step(s)'),
+      contains('[2] Rewrite the module\n    agent: step limit, 2 steps'),
     );
-    expect(text, contains('[3] Think first\n    agent: timed out, 4 step(s)'));
+    expect(text, contains('[3] Think first\n    agent: timed out, 4 steps'));
     expect(text, contains('Pick one with: doc timelines pick $id <k>'));
 
     // Branches hold each agent's commit; the user's repo is untouched.
@@ -441,7 +439,7 @@ void main() {
     expect('$out', contains('(archived)'));
     out.clear();
     expect(await doc(['timelines', 'list']), 0);
-    expect('$out', contains('$id  done  3 timeline(s), 1 passing, picked 1'));
+    expect('$out', contains('$id  done  3 timelines, 1 passing, picked 1'));
 
     // clean: worktree folders go after a yes; branches stay.
     out.clear();
@@ -623,7 +621,7 @@ void main() {
     expect(
       text,
       contains(
-        '2 step(s) (waiting for approval to run a shell command (Doc runs agents without a shell))',
+        '2 steps (waiting for approval to run a shell command (Doc runs agents without a shell))',
       ),
     );
     expect(text, contains('stopped after 2 s without progress'));
@@ -761,6 +759,166 @@ void main() {
       2,
       3,
     ]);
+  });
+
+  test('the TUI\'s t: lanes update live, a stalled and a timed-out lane, '
+      'Wonder\'s ranking in the lanes, p shows the diff, c cleans', () async {
+    await planner(
+      plan([
+        ('Put the value back', 'FAKE-FIX'),
+        ('Check with a command', 'FAKE-BASH'),
+        ('Think first', 'FAKE-HANG'),
+      ]),
+      judge: [
+        judged([
+          (1, 8, 'Fixes it.'),
+          (2, 2, 'Leaves the bug.'),
+          (3, 1, 'Changes nothing.'),
+        ], 1),
+      ],
+    );
+    final before = snapshot();
+    final host = FakeHost();
+    final backend = FakeBackend(turns: const [])
+      ..testCommand = goodTest
+      ..agentModel = 'muse-spark-1.3-contributor';
+    // The real doc timelines, in-process, over the fake muse.
+    backend.onRun = (args, io) => runDoc(
+      [...args, '--dmc', dmc, '--workspace', repo.path],
+      environment: {
+        'DOC_CONFIG_DIR': p.join(home.path, 'config'),
+        'DOC_DATA_DIR': p.join(home.path, 'data'),
+        'HOME': home.path,
+        'PATH': Platform.environment['PATH'] ?? '',
+        if (Platform.isWindows)
+          'SystemRoot': Platform.environment['SystemRoot'] ?? r'C:\Windows',
+        'MODEL_API_KEY': 'LLM|meta-key-for-tests-01',
+        'DOC_MUSE_BIN': fakeMuse,
+        'FAKE_MUSE_LOG': museLog,
+      },
+      out: io.out,
+      err: io.out,
+      client: ChatClient(maxRetries: 0, sleep: (_) async {}),
+      readLine: io.ask,
+      progress: io.progress,
+      timelines: const TimelineDeps(
+        statusEvery: Duration(seconds: 1),
+        agentTimeout: Duration(seconds: 5),
+        stall: Duration(seconds: 2),
+      ),
+    );
+    final started = startApp(
+      host,
+      backend,
+      noteFor: const Duration(minutes: 5),
+    );
+    // The agents' logs are real files in the run's folder.
+    started.app.readLogFile = (path) =>
+        File(path).existsSync() ? File(path).readAsStringSync() : '';
+    addTearDown(() async {
+      started.app.quit();
+      await started.running;
+    });
+    Future<void> waitFor(String text, {int seconds = 60}) async {
+      for (var i = 0; i < seconds * 20; i++) {
+        if (host.screen.contains(text)) return;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      fail('Timed out waiting for "$text". Screen:\n${host.screen}');
+    }
+
+    await waitFor('No agent turns yet');
+    await host.press('t');
+    await waitFor('Task for three agents');
+    expect(
+      host.screen,
+      contains('> Fix the failing tests without changing the tests'),
+    );
+    await host.enter();
+    await waitFor('Test command');
+    expect(host.screen, contains('> $goodTest'));
+    await host.enter();
+    await waitFor('Setup command');
+    await host.enter();
+    await waitFor('Agent model');
+    expect(host.screen, contains('> muse-spark-1.3-contributor'));
+    expect(
+      host.screen,
+      contains('Estimate for 3 agents × 20 steps: at most \$'),
+    );
+    await host.enter();
+    // doc timelines' own single question, with the cost; the plan under d.
+    await waitFor('[y/N]');
+    expect(
+      host.screen,
+      contains('Run 3 Muse Code agents (muse-spark-1.3-contributor)'),
+    );
+    expect(host.screen, contains('est. cost'));
+    expect(host.screen, contains('d: the plan and the estimate'));
+    expect(host.screen, contains('TIMELINES'));
+    await host.press('y');
+
+    await waitFor('running', seconds: 30);
+    await waitFor('stalled', seconds: 30);
+    expect(
+      host.screen,
+      contains('waiting for approval to run a shell command'),
+    );
+    await waitFor('timed out', seconds: 30);
+    await waitFor('Wonder recommends [1]', seconds: 60);
+    final frames = [for (final f in host.frames) f.join('\n')];
+    // Lanes updated live: a running lane counted its steps.
+    expect(
+      frames.any((f) => RegExp(r'running · [1-9] steps? · 0:0').hasMatch(f)),
+      isTrue,
+    );
+    final screen = host.screen;
+    expect(screen, contains('[1] Put the value back'));
+    expect(screen, contains('tests PASS'));
+    expect(screen, contains('tests FAIL'));
+    expect(screen, contains('8/10'));
+    expect(screen, contains('★ recommended'));
+    expect(screen, contains('Did: Writes good to state.txt.'));
+    expect(screen, contains("didn't follow its plan"));
+    expect(screen, contains('Planned: '));
+    // Failing tests named once, not per lane.
+    expect(RegExp('fail: ').allMatches(screen), hasLength(1));
+    expect(screen, isNot(contains('[timeline ')));
+
+    // d: models, tokens, costs, worktrees and branches.
+    await host.press('d');
+    expect(host.screen, contains('model: muse-spark-1.3-contributor'));
+    expect(host.screen, contains('branch: doc/timeline/'));
+    expect(host.screen, contains('worktree: '));
+    await host.escape();
+    // o: the selected agent's log.
+    await host.press('o');
+    expect(host.screen, contains('Agent log · [1] Put the value back'));
+    expect(host.screen, contains('run.lifecycle.started'));
+    await host.escape();
+
+    // p: the diff and the git commands; nothing applied.
+    await host.press('p');
+    await waitFor('Timeline 1: Put the value back');
+    expect(host.screen, contains('+good'));
+    expect(host.screen, contains('git apply'));
+    expect(snapshot(), before);
+    await host.escape();
+    expect(host.screen, contains('Picked [1]'));
+
+    // c: asks, then removes the worktree folders (branches kept).
+    final worktrees = [
+      for (final t in (runJson()['timelines'] as List).cast<Map>())
+        t['worktree'] as String,
+    ];
+    expect(worktrees.every((w) => Directory(w).existsSync()), isTrue);
+    await host.press('c');
+    await waitFor('Remove 3 worktree folders');
+    await host.press('y');
+    await waitFor('Removed 3 worktree folders; the branches are kept.');
+    expect(worktrees.any((w) => Directory(w).existsSync()), isFalse);
+    expect(await branches(), hasLength(3));
+    expect(snapshot(), before);
   });
 
   test('an unknown timeline is refused and asked once more', () async {

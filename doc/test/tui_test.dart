@@ -201,6 +201,154 @@ package:test_api           expect
       );
     });
 
+    test('timelines lanes: the lesson once, live clocks, one failing test '
+        'named once for all lanes', () {
+      const tail =
+          'ERROR: test_checkout_total (test_checkout.CheckoutTest)\nValueError: discount must be between 0 and 1';
+      Timeline lane(int k, TimelineStatus status, {String? reason}) => Timeline(
+        k: k,
+        approach: TimelineApproach('Approach $k', 'Plan $k.', const []),
+        branch: 'doc/timeline/tl-1/$k',
+        worktree: '/tmp/tl-1/$k',
+        status: status,
+        reason: reason,
+        steps: k,
+        seconds: 70,
+        test: status == TimelineStatus.running
+            ? null
+            : const TimelineTest(
+                passed: false,
+                timedOut: false,
+                setupFailed: false,
+                seconds: 1,
+                tail: tail,
+              ),
+      );
+      final run = TimelineRun(
+        id: 'tl-1',
+        createdAt: '2026-11-02T00:00:00Z',
+        task: 'Fix the tests broken by: Discount takes a fraction',
+        test: 'python3 -m unittest -q',
+        setup: null,
+        links: const [],
+        maxSteps: 20,
+        timeoutMinutes: 10,
+        repo: '/tmp/shop',
+        workspaceFingerprint: 'f',
+        baseCheckpoint: _bug,
+        baseState: 'after',
+        baseLabel: null,
+        baseCommit: null,
+        brief: 'Before you start: keep percents.',
+        planner: const {},
+        timelines: [
+          lane(1, TimelineStatus.done),
+          lane(2, TimelineStatus.stalled, reason: 'no progress for 90 s'),
+          lane(
+            3,
+            TimelineStatus.failed,
+            reason: 'did not finish within 8 step(s)',
+          ),
+        ],
+      );
+      final now = DateTime(2026, 11, 2, 12);
+      final pane = TimelinesPane(run.task)
+        ..update({
+          'type': 'timelines.run',
+          'phase': 'done',
+          'lessonTitles': ['Keep percent inputs'],
+          'run': run.toJson(),
+        }, now);
+      final text = timelinesColumn(pane, 116, now).map(lineText).join('\n');
+      expect(
+        RegExp('Using lesson: Keep percent inputs').allMatches(text),
+        hasLength(1),
+      );
+      expect(text, contains('done · 1 step · 1:10  tests FAIL'));
+      expect(text, contains('stalled · 2 steps'));
+      expect(text, contains('no progress for 90 s'));
+      expect(text, contains('step limit · 3 steps'));
+      expect(text, contains('did not finish within 8 steps'));
+      expect(text, contains('All 3 fail the same test: test_checkout_total'));
+      expect(RegExp('test_checkout_total').allMatches(text), hasLength(1));
+      expect(text, contains('ValueError: discount must be between 0 and 1'));
+
+      // Judged: the ranking in the lanes, and Wonder's summary in full.
+      final summary = List.filled(30, 'word').join(' ');
+      run.judgment = {
+        'ranking': [
+          {
+            'k': 2,
+            'score': 7,
+            'rationale': 'r',
+            'followedPlan': 'no',
+            'actualChange': 'Changed checkout.py instead.',
+          },
+          {'k': 1, 'score': 4, 'rationale': 'r', 'followedPlan': 'yes'},
+        ],
+        'recommended': 2,
+        'summary': summary,
+      };
+      final judged = TimelinesPane(run.task)
+        ..update({
+          'type': 'timelines.run',
+          'phase': 'done',
+          'run': run.toJson(),
+        }, now);
+      final ranked = timelinesColumn(judged, 116, now).map(lineText).join('\n');
+      expect(ranked, contains('#1 [2] Approach 2'));
+      expect(ranked, contains('7/10  ★ recommended'));
+      expect(ranked, contains('Planned: Plan 2.'));
+      expect(ranked, contains('Did: Changed checkout.py instead.'));
+      expect(ranked, contains("didn't follow its plan"));
+      expect(ranked, contains('Wonder recommends [2]'));
+      expect(ranked.replaceAll(RegExp(r'\s+'), ' '), contains(summary));
+
+      // A running lane's clock is live.
+      final live = run.toJson();
+      ((live['timelines'] as List)[0] as Map)
+        ..['status'] = 'running'
+        ..['test'] = null;
+      final running = TimelinesPane(run.task)
+        ..update({
+          'type': 'timelines.run',
+          'phase': 'running',
+          'run': live,
+        }, now);
+      expect(
+        timelinesColumn(
+          running,
+          116,
+          now.add(const Duration(seconds: 75)),
+        ).map(lineText).join('\n'),
+        contains('running · 1 step · 1:15'),
+      );
+    });
+
+    test('the detail diff: a dim header per file, from the first change', () {
+      final lines = diffPreview(
+        '--- money.py (modified)\n'
+        '@@ -1,4 +1,4 @@\n'
+        ' def apply_discount(price, d):\n'
+        '     """Docs."""\n'
+        '-    return price * (100 - d) / 100\n'
+        '+    return price * (1 - d)\n'
+        ' # end\n'
+        '--- notes.md (created)\n'
+        '+new\n',
+        12,
+      ).map(lineText).toList();
+      expect(lines, [
+        'money.py',
+        '-    return price * (100 - d) / 100',
+        '+    return price * (1 - d)',
+        ' # end',
+        'notes.md',
+        '+new',
+      ]);
+      expect(diffPreview('--- a (modified)\n-x\n+y\n-z', 2), hasLength(2));
+    });
+
     test('files and +/- counts from a turn\'s diff', () {
       final files = filesFromDiff(
         '--- a.py (modified)\n-x\n+y\n+z\n--- b.py (created)\n+new\n',
@@ -368,15 +516,12 @@ package:test_api           expect
             'Restore cp_mvyya1b2 (muse): 1 file',
             '  money.py: put back the version from before the turn',
           ],
-          prompt: 'Apply this restore (1 step(s), 1 file(s))? [y/N]',
+          prompt: 'Apply this restore (1 step, 1 file)? [y/N]',
           yesNo: true,
         );
       final frame = renderTui(state, 120, 36, color: false).join('\n');
       expect(frame, contains('Restore cp_mvyya1b2 (muse): 1 file'));
-      expect(
-        frame,
-        contains('Apply this restore (1 step(s), 1 file(s))? [y/N]'),
-      );
+      expect(frame, contains('Apply this restore (1 step, 1 file)? [y/N]'));
       expect(frame, contains('y yes · n / Enter / Esc no'));
     });
   });
@@ -386,8 +531,11 @@ package:test_api           expect
     late FakeBackend backend;
     late ({TuiApp app, Future<int> running}) started;
 
-    Future<void> open({bool splash = false}) async {
-      started = startApp(host, backend, splash: splash);
+    Future<void> open({
+      bool splash = false,
+      Duration noteFor = const Duration(seconds: 5),
+    }) async {
+      started = startApp(host, backend, splash: splash, noteFor: noteFor);
       await until(
         () =>
             host.screen.contains('AGENT TURNS') ||
@@ -451,35 +599,162 @@ package:test_api           expect
       },
     );
 
-    test(
-      'r: dmc\'s preview in a dialog, y applies, the list refreshes',
-      () async {
-        final answers = <String?>[];
-        backend.onRun = (args, io) async {
-          if (args.first == 'summarize') return 1;
-          return script(
-            [
-              'Restore $_readme (muse-code):',
-              '  README.md: put back the version from before the turn',
-            ],
-            question: 'Apply this restore? [y/N] ',
-            after: ['Restored $_readme.'],
-            answers: answers,
-          )(args, io);
+    test('"try three different fixes" by voice opens the lanes', () async {
+      backend.onRun = (args, io) async {
+        if (args.first != 'talk') return 1;
+        expect(await io.voice!.terminal.readKey(), TalkKey.toggle);
+        expect(await io.voice!.terminal.readKey(), TalkKey.toggle);
+        io.out.write(
+          'I heard: "try three different fixes" → I\'ll run: doc timelines "try three different fixes" --from-bisect\nRun it? [y/N] ',
+        );
+        if (await io.ask() != 'y') return 0;
+        final lane = {
+          'k': 1,
+          'approach': {'title': 'Convert at the call site', 'plan': 'p'},
+          'branch': 'doc/timeline/tl-1/1',
+          'worktree': '/tmp/tl-1/1',
+          'status': 'running',
+          'steps': 2,
         };
+        io.progress({
+          'type': 'timelines.run',
+          'phase': 'running',
+          'dir': '/tmp/tl-1',
+          'lessonTitles': ['Keep percent inputs'],
+          'run': {
+            'id': 'tl-1',
+            'createdAt': '2026-11-02T00:00:00Z',
+            'task': 'try three different fixes',
+            'test': 'python3 -m unittest -q',
+            'maxSteps': 20,
+            'timeoutMinutes': 10,
+            'repo': '/tmp/shop',
+            'workspaceFingerprint': 'f',
+            'base': {'checkpointId': _bug, 'state': 'after'},
+            'timelines': [lane],
+          },
+        });
+        await pump(4);
+        expect(host.screen, contains('TIMELINES · try three different fixes'));
+        expect(host.screen, contains('Using lesson: Keep percent inputs'));
+        expect(host.screen, contains('running · 2 steps'));
+        return 0;
+      };
+      await open();
+      await host.press(' ');
+      await host.press(' ');
+      await until(() => host.screen.contains('Run it? [y/N]'));
+      await host.press('y');
+      await until(() => host.screen.contains('Convert at the call site'));
+      await until(() => !host.screen.contains('Run it?'));
+      await pump(10);
+      expect(host.screen, contains('TIMELINES'));
+      expect(host.screen, contains('p pick'));
+    });
+
+    test('r: dmc\'s preview in a dialog, y applies, the list refreshes', () async {
+      final answers = <String?>[];
+      backend.onRun = (args, io) async {
+        if (args.first == 'summarize') return 1;
+        return script(
+          [
+            'Restore would change 3 files:',
+            '  - money.py: put back the version from before the turn',
+            '  - checkout.py: put back the version from before the turn',
+            '  - notes.md: delete it (the turn created it)',
+          ],
+          question:
+              'Undo this muse turn? 3 files change (money.py, checkout.py, +1)  [y/N] ',
+          after: ['Restored $_readme.'],
+          answers: answers,
+        )(args, io);
+      };
+      await open();
+      await host.press('r');
+      await until(
+        () => host.screen.contains(
+          'Undo this muse turn? 3 files change (money.py, checkout.py, +1)  [y/N]',
+        ),
+      );
+      // One line; the per-file list is under d.
+      expect(host.screen, isNot(contains('notes.md: delete it')));
+      expect(host.screen, contains('d: every file'));
+      await host.press('d');
+      expect(host.screen, contains('  - notes.md: delete it'));
+      expect(answers, isEmpty);
+      expect(backend.runs.last, ['restore', _readme]);
+      await host.press('y');
+      await until(() => host.screen.contains('Restored $_readme.'));
+      expect(answers, ['y']);
+    });
+
+    test(
+      'titles replace prompts in the list; the prompt is in details',
+      () async {
+        backend.summaries[_bug] =
+            'Title: Discount takes a fraction\n'
+            'apply_discount in money.py now takes 0.25 for 25%.\n\n(meta m; 1 in / 2 out)';
+        backend.onRun = (args, io) async => 1;
         await open();
-        await host.press('r');
-        await until(() => host.screen.contains('Apply this restore? [y/N]'));
+        expect(host.screen, contains('✗ muse   Discount takes a fraction'));
         expect(
           host.screen,
-          contains('README.md: put back the version from before the turn'),
+          isNot(contains('In money.py, change apply_discount')),
         );
-        expect(backend.runs.last, ['restore', _readme]);
-        await host.press('y');
-        await until(() => host.screen.contains('Restored $_readme.'));
-        expect(answers, ['y']);
+        // Turns without a cached title keep their prompt.
+        expect(host.screen, contains('In README.md, add a short Usage'));
+        await host.press(const KeyEvent(KeyKind.down));
+        await host.press(const KeyEvent(KeyKind.down));
+        await pump(10);
+        expect(host.screen, contains('apply_discount in money.py now takes'));
+        expect(
+          backend.runs.where((r) => r.first == 'summarize' && r.last == _bug),
+          isEmpty,
+        );
+        await host.press('d');
+        expect(
+          host.screen,
+          contains('Prompt: In money.py, change apply_discount'),
+        );
       },
     );
+
+    test('the bar note clears on the next key, after a while, and never '
+        'shows on another pane', () async {
+      backend.onRun = (args, io) async => args.first == 'restore'
+          ? script(
+              const [],
+              question:
+                  'Undo this muse turn? README.md: put back the version from before it  [y/N] ',
+              after: ['Nothing was changed.'],
+            )(args, io)
+          : 1;
+      await open(noteFor: const Duration(milliseconds: 300));
+      await host.press('r');
+      await until(() => host.screen.contains('[y/N]'));
+      await host.press('n');
+      await until(() => host.screen.contains('◉ Nothing was changed.'));
+      await host.press('l');
+      await until(() => host.screen.contains('LESSONS'));
+      expect(host.screen, isNot(contains('Nothing was changed.')));
+      await host.escape();
+      await host.press('r');
+      await until(() => host.screen.contains('[y/N]'));
+      await host.press('n');
+      await until(() => host.screen.contains('◉ Nothing was changed.'));
+      await host.press('?');
+      expect(host.screen, isNot(contains('Nothing was changed.')));
+      await host.escape();
+      await host.press('r');
+      await until(() => host.screen.contains('[y/N]'));
+      await host.press('n');
+      await until(() => host.screen.contains('◉ Nothing was changed.'));
+      await until(
+        () => !host.screen.contains('Nothing was changed.'),
+        what: 'the note to time out',
+      );
+      expect(host.screen, contains('Space: talk to Doc'));
+    });
 
     test('n or Esc answers no', () async {
       final answers = <String?>[];
@@ -504,7 +779,7 @@ package:test_api           expect
         backend.onRun = (args, io) async => args.first == 'restore'
             ? script([
                 'Turn 3 of 4 · muse · In money.py, change apply_discount… · files: money.py',
-              ], question: 'Apply this restore (1 step(s), 1 file(s))? [y/N] ')(
+              ], question: 'Apply this restore (1 step, 1 file)? [y/N] ')(
                 args,
                 io,
               )
@@ -536,7 +811,9 @@ package:test_api           expect
       }
       await host.press('u');
       await until(
-        () => host.screen.contains('Redo this turn (1 file(s))? [y/N]'),
+        () => host.screen.contains(
+          "Redo this claude turn? money.py: put back the turn's version  [y/N]",
+        ),
       );
       expect(backend.dmcCalls.last, ['checkpoint', 'redo', _price]);
       await host.press('y');
@@ -547,6 +824,14 @@ package:test_api           expect
     test('b: test and setup asked once, the strip fills in, the bad turn, '
         'then a restore offer', () async {
       backend.onRun = (args, io) async {
+        if (args.first == 'restore') {
+          return script(
+            const [],
+            question:
+                'Undo this muse turn? money.py: put back the version from before it  [y/N] ',
+            after: ['Nothing was changed.'],
+          )(args, io);
+        }
         if (args.first != 'bisect') return 1;
         io.out.writeln('[probe 1] noise that never shows');
         for (final (id, state, passed) in [
@@ -590,9 +875,10 @@ package:test_api           expect
       await host.enter();
       await until(() => host.screen.contains('Setup command'));
       await host.enter();
-      await until(() => host.screen.contains('Restore to before this turn?'));
+      await until(() => host.screen.contains('Undo this muse turn? money.py'));
+      expect(backend.runs.last, ['restore', _bug]);
       final text = host.screen;
-      expect(backend.runs.last, [
+      expect(backend.runs[backend.runs.length - 2], [
         'bisect',
         '--test',
         'python3 -m unittest -q',
@@ -643,7 +929,7 @@ package:test_api           expect
           );
           final answer = await io.ask();
           if (answer == 'y') {
-            io.out.writeln('Workspace /tmp/shop: 4 checkpoint(s).');
+            io.out.writeln('Workspace /tmp/shop: 4 checkpoints.');
           }
           return 0;
         };
@@ -661,7 +947,7 @@ package:test_api           expect
         expect(host.screen, isNot(contains('1.8 s of audio sent')));
         await host.press('y');
         await until(
-          () => host.screen.contains('Workspace /tmp/shop: 4 checkpoint(s).'),
+          () => host.screen.contains('Workspace /tmp/shop: 4 checkpoints.'),
         );
         expect(host.screen, contains('AGENT TURNS'));
       },
