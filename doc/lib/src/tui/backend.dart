@@ -16,6 +16,8 @@ import '../dmc_client.dart';
 import '../doctor_command.dart';
 import '../lesson_commands.dart';
 import '../lessons.dart';
+import '../timelines.dart' show museConfiguredModel;
+import '../timelines_command.dart' show readMuseSettings;
 import '../summarize.dart' show summaryPromptVersion;
 import 'app.dart';
 import 'model.dart';
@@ -185,6 +187,10 @@ class DocBackend implements TuiBackend {
   String? defaultSetup() =>
       lastBisect()?['setup'] as String? ??
       (root == null ? null : suggestSetup(root!));
+
+  @override
+  String? defaultAgentModel() =>
+      museConfiguredModel(readMuseSettings(context.env));
 
   @override
   bool get summaryOnModal =>

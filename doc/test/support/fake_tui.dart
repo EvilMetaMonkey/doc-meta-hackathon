@@ -186,10 +186,17 @@ class FakeBackend implements TuiBackend {
   void saveSummary(String id, String output) => summaries[id] = output;
 
   @override
-  String? defaultTest() => 'python3 -m unittest -q';
+  String? defaultTest() => testCommand;
+
+  String testCommand = 'python3 -m unittest -q';
 
   @override
   String? defaultSetup() => null;
+
+  String? agentModel = 'muse-spark-1.3';
+
+  @override
+  String? defaultAgentModel() => agentModel;
 }
 
 /// A TuiApp over the fakes, with short timers and in-memory logs.

@@ -360,12 +360,14 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   ];
   String? brief;
   var lessonIds = <String>[];
+  var lessonTitles = <String>[];
   final briefResult = await buildBrief(context, task, extraFiles: baseFiles);
   if (briefResult != null) {
     say(lessonMatchSummary(briefResult.matches, briefResult.candidates));
     if (briefResult.brief != null) {
       brief = briefResult.brief;
       lessonIds = [for (final m in briefResult.matches) m.lesson.id];
+      lessonTitles = [for (final m in briefResult.matches) m.lesson.title];
       say('Lesson brief (${briefResult.footer}): $brief');
     }
   }
@@ -497,6 +499,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       if (again?.brief != null) {
         brief = again!.brief;
         lessonIds = [for (final m in again.matches) m.lesson.id];
+        lessonTitles = [for (final m in again.matches) m.lesson.title];
         say('Lesson brief for the agents (${again.footer}): $brief');
       }
     }
@@ -531,6 +534,15 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     ],
   );
   _save(context, run);
+  // The whole run for a UI, at every change (printed output is the same).
+  void report(String phase) => context.progress?.call({
+    'type': 'timelines.run',
+    'phase': phase,
+    'dir': runDir,
+    'lessonTitles': lessonTitles,
+    'run': run.toJson(),
+  });
+  report('planned');
 
   // 3. Confirm, with an honest estimate.
   final hooks = await Process.run(dmc.executable, [
@@ -595,6 +607,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   if (!agreed) {
     run.status = 'declined';
     _save(context, run);
+    report('declined');
     Directory(exportDir).deleteSync(recursive: true);
     say('Nothing was started. The plan is saved as $runId.');
     if (json) context.out.writeln(jsonEncode(run.toJson()));
@@ -674,6 +687,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   // 5–6. Agents in parallel, then each one's tests.
   active.status = 'running';
   _save(context, active);
+  report('running');
   final muse = context.env['DOC_MUSE_BIN'] ?? 'muse';
   final processes = <int, Process>{};
   var interrupted = false;
@@ -730,6 +744,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     final watch = Stopwatch()..start();
     t.status = TimelineStatus.running;
     say('[timeline ${t.k}] running: ${t.approach.title}');
+    report('running');
     final events = File(p.join(runDir, '${t.k}.jsonl')).openWrite();
     final log = File(p.join(runDir, '${t.k}.log')).openWrite();
     Process? process;
@@ -759,6 +774,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       t.status = TimelineStatus.failed;
       t.reason = 'could not start $muse: ${error.message}';
       say('[timeline ${t.k}] failed: ${t.reason}');
+      report('running');
       await events.close();
       await log.close();
       return;
@@ -777,6 +793,10 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
             events.writeln(line);
             progress.add(line);
             lastEvent = watch.elapsed;
+            if (progress.steps != t.steps) {
+              t.steps = progress.steps;
+              report('running');
+            }
           }),
       process.stderr
           .transform(const Utf8Decoder(allowMalformed: true))
@@ -886,6 +906,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
             .where((c) => c['agent'] is Map)
             .length;
     _save(context, active);
+    report('running');
     if (interrupted) return;
 
     // Tests, with bisect's runner, in the worktree.
@@ -938,6 +959,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       '[timeline ${t.k}] tests ${passed ? 'PASS' : 'FAIL'} (${t.test!.seconds.toStringAsFixed(1)}s)',
     );
     _save(context, active);
+    report('running');
   }
 
   Future<void> runOne(Timeline t) async {
@@ -951,6 +973,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       t.reason ??= '$error';
       say('[timeline ${t.k}] error: $error');
       _save(context, active);
+      report('running');
     }
   }
 
@@ -973,9 +996,11 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   if (!interrupted && !(args['no-judge'] as bool)) {
     say('');
     say('Asking Muse Wonder to judge the timelines…');
+    report('judging');
     await _judge(context, active, judgmentLines.add);
     _save(context, active);
   }
+  report(active.status);
   say('');
   say(
     'Run $runId (${clockText(active.seconds)} wall time). Base: $baseId $state.',

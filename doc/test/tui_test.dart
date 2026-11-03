@@ -201,6 +201,99 @@ package:test_api           expect
       );
     });
 
+    test('timelines lanes: the lesson once, live clocks, one failing test '
+        'named once for all lanes', () {
+      const tail =
+          'ERROR: test_checkout_total (test_checkout.CheckoutTest)\nValueError: discount must be between 0 and 1';
+      Timeline lane(int k, TimelineStatus status, {String? reason}) => Timeline(
+        k: k,
+        approach: TimelineApproach('Approach $k', 'Plan $k.', const []),
+        branch: 'doc/timeline/tl-1/$k',
+        worktree: '/tmp/tl-1/$k',
+        status: status,
+        reason: reason,
+        steps: k,
+        seconds: 70,
+        test: status == TimelineStatus.running
+            ? null
+            : const TimelineTest(
+                passed: false,
+                timedOut: false,
+                setupFailed: false,
+                seconds: 1,
+                tail: tail,
+              ),
+      );
+      final run = TimelineRun(
+        id: 'tl-1',
+        createdAt: '2026-11-02T00:00:00Z',
+        task: 'Fix the tests broken by: Discount takes a fraction',
+        test: 'python3 -m unittest -q',
+        setup: null,
+        links: const [],
+        maxSteps: 20,
+        timeoutMinutes: 10,
+        repo: '/tmp/shop',
+        workspaceFingerprint: 'f',
+        baseCheckpoint: _bug,
+        baseState: 'after',
+        baseLabel: null,
+        baseCommit: null,
+        brief: 'Before you start: keep percents.',
+        planner: const {},
+        timelines: [
+          lane(1, TimelineStatus.done),
+          lane(2, TimelineStatus.stalled, reason: 'no progress for 90 s'),
+          lane(
+            3,
+            TimelineStatus.failed,
+            reason: 'did not finish within 8 step(s)',
+          ),
+        ],
+      );
+      final now = DateTime(2026, 11, 2, 12);
+      final pane = TimelinesPane(run.task)
+        ..update({
+          'type': 'timelines.run',
+          'phase': 'done',
+          'lessonTitles': ['Keep percent inputs'],
+          'run': run.toJson(),
+        }, now);
+      final text = timelinesColumn(pane, 116, now).map(lineText).join('\n');
+      expect(
+        RegExp('Using lesson: Keep percent inputs').allMatches(text),
+        hasLength(1),
+      );
+      expect(text, contains('done · 1 step · 1:10  tests FAIL'));
+      expect(text, contains('stalled · 2 steps'));
+      expect(text, contains('no progress for 90 s'));
+      expect(text, contains('step limit · 3 steps'));
+      expect(text, contains('did not finish within 8 steps'));
+      expect(text, contains('All 3 fail the same test: test_checkout_total'));
+      expect(RegExp('test_checkout_total').allMatches(text), hasLength(1));
+      expect(text, contains('ValueError: discount must be between 0 and 1'));
+
+      // A running lane's clock is live.
+      final live = run.toJson();
+      ((live['timelines'] as List)[0] as Map)
+        ..['status'] = 'running'
+        ..['test'] = null;
+      final running = TimelinesPane(run.task)
+        ..update({
+          'type': 'timelines.run',
+          'phase': 'running',
+          'run': live,
+        }, now);
+      expect(
+        timelinesColumn(
+          running,
+          116,
+          now.add(const Duration(seconds: 75)),
+        ).map(lineText).join('\n'),
+        contains('running · 1 step · 1:15'),
+      );
+    });
+
     test('the detail diff: a dim header per file, from the first change', () {
       final lines = diffPreview(
         '--- money.py (modified)\n'
@@ -474,6 +567,59 @@ package:test_api           expect
         expect(backend.runs.where((r) => r.last == _readme), hasLength(1));
       },
     );
+
+    test('"try three different fixes" by voice opens the lanes', () async {
+      backend.onRun = (args, io) async {
+        if (args.first != 'talk') return 1;
+        expect(await io.voice!.terminal.readKey(), TalkKey.toggle);
+        expect(await io.voice!.terminal.readKey(), TalkKey.toggle);
+        io.out.write(
+          'I heard: "try three different fixes" → I\'ll run: doc timelines "try three different fixes" --from-bisect\nRun it? [y/N] ',
+        );
+        if (await io.ask() != 'y') return 0;
+        final lane = {
+          'k': 1,
+          'approach': {'title': 'Convert at the call site', 'plan': 'p'},
+          'branch': 'doc/timeline/tl-1/1',
+          'worktree': '/tmp/tl-1/1',
+          'status': 'running',
+          'steps': 2,
+        };
+        io.progress({
+          'type': 'timelines.run',
+          'phase': 'running',
+          'dir': '/tmp/tl-1',
+          'lessonTitles': ['Keep percent inputs'],
+          'run': {
+            'id': 'tl-1',
+            'createdAt': '2026-11-02T00:00:00Z',
+            'task': 'try three different fixes',
+            'test': 'python3 -m unittest -q',
+            'maxSteps': 20,
+            'timeoutMinutes': 10,
+            'repo': '/tmp/shop',
+            'workspaceFingerprint': 'f',
+            'base': {'checkpointId': _bug, 'state': 'after'},
+            'timelines': [lane],
+          },
+        });
+        await pump(4);
+        expect(host.screen, contains('TIMELINES · try three different fixes'));
+        expect(host.screen, contains('Using lesson: Keep percent inputs'));
+        expect(host.screen, contains('running · 2 steps'));
+        return 0;
+      };
+      await open();
+      await host.press(' ');
+      await host.press(' ');
+      await until(() => host.screen.contains('Run it? [y/N]'));
+      await host.press('y');
+      await until(() => host.screen.contains('Convert at the call site'));
+      await until(() => !host.screen.contains('Run it?'));
+      await pump(10);
+      expect(host.screen, contains('TIMELINES'));
+      expect(host.screen, contains('p pick'));
+    });
 
     test('r: dmc\'s preview in a dialog, y applies, the list refreshes', () async {
       final answers = <String?>[];

@@ -5,6 +5,7 @@ library;
 import 'dart:math';
 
 import '../doctor_command.dart';
+import '../timelines.dart';
 import 'model.dart';
 import 'text.dart';
 import '../plural.dart';
@@ -113,6 +114,11 @@ List<Line> _frame(TuiState state, int width, int height) {
       PaneKind.result => _resultColumn(state.result, width - 4),
       PaneKind.bisect => _bisectColumn(state.bisect, width - 4),
       PaneKind.lessons => _lessonsColumn(state.lessons, width - 4, bodyHeight),
+      PaneKind.timelines => timelinesColumn(
+        state.timelines,
+        width - 4,
+        state.now,
+      ),
       PaneKind.turns => <Line>[],
     };
     for (var i = 0; i < bodyHeight; i++) {
@@ -470,7 +476,7 @@ _Box _questionBox(Question question, int width) {
   } else if (question.oneLine &&
       !question.showDetails &&
       question.context.isNotEmpty) {
-    rows.add(row(plain('d: every file', Tone.dim)));
+    rows.add(row(plain(question.detailsHint, Tone.dim)));
   }
   rows.add([Span('└${'─' * (width - 2)}┘', Tone.warn)]);
   return _Box(rows, width);
@@ -621,6 +627,10 @@ List<String> keyHints(TuiState state) => switch (state.pane) {
     '↑↓ select · Enter show · y approve · e edit · x reject · Esc back',
     ': command · ? help · q quit',
   ],
+  PaneKind.timelines => [
+    '↑↓ lane · p pick (shows the diff; applies nothing) · c clean worktrees · Esc back',
+    'd details · o agent log · : command · ? help · q quit',
+  ],
 };
 
 List<Line> _keyLines(TuiState state, int width) => [
@@ -641,19 +651,222 @@ Pager helpPager() => Pager('Doc · keys', [
 /// The help text: every key, then the command bar.
 const List<(String, String)> tuiKeyHelp = [
   ('Space', 'talk to Doc (Space/Enter stops, Esc cancels); anywhere'),
-  ('↑ ↓', 'select a turn (or a lesson)'),
+  ('↑ ↓', 'select a turn (or a lesson, or a lane)'),
   ('s', 'summarize the selected turn in plain English'),
   ('d', 'details: full diff, ids, times, model and cost'),
-  ('o', 'the raw log of the selected item'),
+  ('o', 'the raw log of the selected item (a lane: its agent log)'),
   ('r', 'restore the selected turn (dmc preview, then y)'),
   ('u', 'redo an undone turn (dmc preview, then y)'),
   ('/', 'restore by words ("before it touched auth")'),
   ('b', 'bisect: find the turn that broke the tests'),
   ('l', 'lessons: approve, edit, reject'),
   ('a', 'start an agent with the matching lessons'),
-  ('t', 'timelines: three agents try three fixes'),
+  ('t', 'timelines: three agents try three fixes, in lanes'),
+  (
+    'p',
+    'timelines: pick a lane (its diff and the git commands; applies nothing)',
+  ),
+  ('c', 'timelines: clean the run\'s worktree folders (asks first)'),
   (':', 'command bar: any doc … command, or a read-only dmc … one'),
   ('?', 'this help'),
   ('Esc', 'close, cancel, or back to the turns'),
   ('q', 'quit (Ctrl-C also quits and restores the terminal)'),
 ];
+
+String _laneClock(double seconds) {
+  final s = seconds.round();
+  return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+}
+
+(String, Tone) _laneStatus(Timeline t) => switch (t.status) {
+  TimelineStatus.pending => ('waiting', Tone.dim),
+  TimelineStatus.running => ('running', Tone.warn),
+  TimelineStatus.done => ('done', Tone.good),
+  TimelineStatus.stalled => ('stalled', Tone.warn),
+  TimelineStatus.timedOut => ('timed out', Tone.bad),
+  TimelineStatus.stopped => ('stopped', Tone.dim),
+  TimelineStatus.failed =>
+    t.reason != null && stepLimitReason.hasMatch(t.reason!)
+        ? ('step limit', Tone.warn)
+        : ('failed', Tone.bad),
+};
+
+/// The timelines pane: the task, the lesson used, then one lane per
+/// approach (title, steps, time, status, tests), Wonder's ranking in the
+/// same lanes once judged, and a failing test shown once.
+List<Line> timelinesColumn(TimelinesPane? pane, int width, DateTime now) {
+  if (pane == null) return const [];
+  final rows = <Line>[
+    [const Span('TIMELINES', Tone.strong), Span(' · ${pane.task}', Tone.dim)],
+  ];
+  for (final title in pane.lessonTitles) {
+    rows.add([const Span('Using lesson: ', Tone.dim), Span(title)]);
+  }
+  rows.add(const []);
+  final run = pane.run;
+  if (run == null) {
+    rows.add(
+      plain(
+        pane.running
+            ? 'Planning three approaches with Muse Wonder…'
+            : (pane.stopped ?? 'Nothing was started.'),
+        pane.running ? Tone.warn : Tone.dim,
+      ),
+    );
+    return rows;
+  }
+  final judgment = pane.judgment;
+  final entries = {
+    for (final e in judgment?.ranking ?? const <JudgeEntry>[]) e.k: e,
+  };
+  final rank = {
+    for (final (i, e) in (judgment?.ranking ?? const <JudgeEntry>[]).indexed)
+      e.k: i + 1,
+  };
+  String score(double v) => v.toStringAsFixed(v == v.roundToDouble() ? 0 : 1);
+  // Failing tests: named once for the whole run, not per lane.
+  final failing = <int, String>{
+    for (final t in run.timelines)
+      if (t.test != null && !t.test!.passed)
+        t.k: t.test!.setupFailed
+            ? 'the setup command'
+            : failingTestName(t.test!.tail) ?? 'the tests',
+  };
+  for (final (i, t) in run.timelines.indexed) {
+    final selected = i == pane.selected;
+    final (status, tone) = _laneStatus(t);
+    final entry = entries[t.k];
+    final recommended = judgment != null && judgment.recommended == t.k;
+    final right = <Span>[
+      Span(status, tone),
+      Span(
+        ' · ${plural(t.steps, 'step')} · ${_laneClock(pane.seconds(t, now))}',
+        Tone.dim,
+      ),
+      if (t.test != null)
+        t.test!.passed
+            ? const Span('  tests PASS', Tone.good)
+            : const Span('  tests FAIL', Tone.bad)
+      else if (t.status != TimelineStatus.running &&
+          t.status != TimelineStatus.pending &&
+          pane.running &&
+          pane.phase == 'running')
+        const Span('  testing…', Tone.warn),
+      if (entry != null) Span('  ${score(entry.score)}/10', Tone.strong),
+      if (recommended) const Span('  ★ recommended', Tone.good),
+    ];
+    final rightWidth = displayWidth(lineText(right));
+    final lead =
+        '${selected ? '▶' : ' '} ${rank[t.k] == null ? '' : '#${rank[t.k]} '}[${t.k}] ';
+    final titleRoom = max(10, width - displayWidth(lead) - rightWidth - 2);
+    rows.add([
+      Span(lead, selected ? Tone.strong : Tone.dim),
+      Span(
+        pad(fit(t.approach.title, titleRoom), titleRoom),
+        selected ? Tone.strong : Tone.normal,
+      ),
+      const Span('  '),
+      ...right,
+    ]);
+    const indent = '      ';
+    if (t.status == TimelineStatus.stalled ||
+        t.status == TimelineStatus.timedOut ||
+        t.status == TimelineStatus.failed) {
+      if (t.reason != null) {
+        rows.add(
+          plain(
+            '$indent${fit(plainPlurals(t.reason!), width - indent.length)}',
+            tone,
+          ),
+        );
+      }
+    }
+    if (entry != null) {
+      rows.add([
+        const Span('${indent}Planned: ', Tone.dim),
+        Span(fit(t.approach.plan, width - indent.length - 9)),
+      ]);
+      if (entry.actualChange != null) {
+        rows.add([
+          const Span('${indent}Did: ', Tone.dim),
+          Span(fit(entry.actualChange!, width - indent.length - 5)),
+        ]);
+      }
+      if (entry.strayed) {
+        rows.add(
+          plain('$indent${planAdherenceText(entry.followedPlan)}', Tone.warn),
+        );
+      }
+    }
+    rows.add(const []);
+  }
+  if (failing.isNotEmpty) {
+    final names = failing.values.toSet();
+    if (names.length == 1 && failing.length == run.timelines.length) {
+      rows.add([
+        Span('All ${run.timelines.length} fail the same test: ', Tone.bad),
+        Span(names.single),
+      ]);
+    } else {
+      for (final name in names) {
+        final ks = [
+          for (final e in failing.entries)
+            if (e.value == name) '[${e.key}]',
+        ];
+        rows.add([
+          Span(
+            '${ks.join(' ')} ${ks.length == 1 ? 'fails' : 'fail'}: ',
+            Tone.bad,
+          ),
+          Span(name),
+        ]);
+      }
+    }
+    final first = run.timelines.firstWhere((t) => failing.containsKey(t.k));
+    for (final line in failureEssentials(first.test!.tail, max: 4).skip(1)) {
+      rows.add(plain('  ${fit(line, width - 2)}', Tone.dim));
+    }
+    rows.add(const []);
+  }
+  final footer = switch (pane.phase) {
+    _ when pane.stopped != null && !pane.running => plain(
+      pane.stopped!,
+      Tone.dim,
+    ),
+    'planned' => plain('Waiting for your answer…', Tone.dim),
+    'declined' => plain(
+      'Nothing was started. The plan is saved as ${run.id}.',
+      Tone.dim,
+    ),
+    'running' => plain(
+      'Running ${plural(run.timelines.length, 'agent')} in separate worktrees…',
+      Tone.warn,
+    ),
+    'judging' => plain('Asking Muse Wonder to judge the timelines…', Tone.warn),
+    _ when judgment != null => [
+      Span(
+        judgment.recommended == null
+            ? 'Wonder recommends none of them'
+            : 'Wonder recommends [${judgment.recommended}]',
+        Tone.strong,
+      ),
+      if (judgment.summary.isNotEmpty)
+        Span(' — ${fit(judgment.summary, max(10, width - 32))}'),
+    ],
+    'interrupted' => plain(
+      'Stopped. The worktrees and branches are kept.',
+      Tone.dim,
+    ),
+    _ => plain('Done. p shows a lane\'s diff and how to apply it.', Tone.dim),
+  };
+  rows.add(footer);
+  if (run.picked != null) {
+    rows.add(
+      plain(
+        'Picked [${run.picked}] (nothing applied; p shows the commands).',
+        Tone.good,
+      ),
+    );
+  }
+  return rows;
+}
