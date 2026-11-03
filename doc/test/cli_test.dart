@@ -163,7 +163,7 @@ void main() {
   test('summarize sends redacted facts and prints the summary', () async {
     final baseten = await FakeProvider.start([
       FakeReply.chat(
-        'The turn modified app.dart, deleted old.txt and added a .env file.',
+        '{"title": "App change with new secrets", "summary": "The turn modified app.dart, deleted old.txt and added a .env file."}',
         reasoning: 'thinking...',
         prompt: 300,
         completion: 40,
@@ -186,7 +186,9 @@ void main() {
       env: {'BASETEN_API_KEY': 'baseten-key-for-tests-01'},
     );
     expect(code, 0, reason: '$err');
+    expect('$out', contains('Title: App change with new secrets\n'));
     expect('$out', contains('The turn modified app.dart'));
+    expect('$out', isNot(contains('"summary"')));
     expect('$out', isNot(contains('thinking')));
     expect('$out', contains('(baseten fake-model; 300 in / 40 out;'));
     final sent = baseten.requests.single;
@@ -202,6 +204,13 @@ void main() {
     );
     expect(user, isNot(contains('not-hex-zq-secret')));
     expect(sent.body!.containsKey('max_tokens'), isTrue);
+    // No dmc internals reach the model: no ID, state, agent or counts.
+    expect(user, isNot(contains(checkpointId)));
+    expect(user, isNot(contains('closed')));
+    expect(user, isNot(contains('xclusion')));
+    expect(user, isNot(contains('Protected')));
+    expect(user, isNot(contains('fatal')));
+    expect(baseten.requests, hasLength(1));
     // Doc never writes workspace files.
     expect(_tree(workspace), before);
 
@@ -210,6 +219,53 @@ void main() {
     expect('$out', contains('baseten'));
     expect('$out', contains('300'));
     expect('$out', contains('\$100.00'));
+  });
+
+  test('summarize asks once more for JSON, then falls back to free text', () async {
+    Future<int> run(FakeProvider provider) => doc(
+      [
+        'summarize',
+        checkpointId,
+        '--dmc',
+        dmc,
+        '--workspace',
+        workspace.path,
+        '--role-provider',
+        'summary=baseten',
+      ],
+      env: {'BASETEN_API_KEY': 'baseten-key-for-tests-01'},
+    );
+    // A wordy first answer is refused and asked again.
+    final retried = await FakeProvider.start([
+      FakeReply.chat(
+        '{"title": "Checkpoint closed", "summary": "Checkpoint is closed with six exclusions."}',
+      ),
+      FakeReply.chat(
+        '{"title": "App file reworked", "summary": "app.dart changed and old.txt was deleted."}',
+      ),
+    ]);
+    addTearDown(retried.close);
+    writeConfig(baseten: retried.baseUrl);
+    expect(await run(retried), 0, reason: '$err');
+    expect(retried.requests, hasLength(2));
+    final again = (retried.requests.last.body!['messages'] as List).last as Map;
+    expect('${again['content']}', contains('not usable'));
+    expect('$out', contains('Title: App file reworked'));
+    expect('$out', isNot(contains('six exclusions')));
+    expect('$out', contains('asked twice'));
+
+    // Two unusable answers: the old free-text summary, no title.
+    out.clear();
+    final plainText = await FakeProvider.start([
+      FakeReply.chat('app.dart changed and old.txt was deleted.'),
+    ]);
+    addTearDown(plainText.close);
+    writeConfig(baseten: plainText.baseUrl);
+    expect(await run(plainText), 0, reason: '$err');
+    expect(plainText.requests, hasLength(2));
+    expect('$out', isNot(contains('Title:')));
+    expect('$out', startsWith('app.dart changed and old.txt was deleted.\n'));
+    expect('$out', contains('no title, free-text answer'));
   });
 
   test('--show-prompt prints what would be sent and sends nothing', () async {
@@ -232,7 +288,7 @@ void main() {
     );
     expect(code, 0, reason: '$err');
     expect('$out', contains('Nothing was sent'));
-    expect('$out', contains('Redacted: 0 item(s)'));
+    expect('$out', contains('Redacted: 0 items'));
     expect('$out', contains('"model": "meta-models/muse-spark-open-1026"'));
     expect('$out', isNot(contains('baseten-key-for-tests-01')));
     expect(baseten.requests, isEmpty);

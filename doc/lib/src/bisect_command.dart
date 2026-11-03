@@ -13,6 +13,7 @@ import 'model_client.dart';
 import 'probe_runner.dart';
 import 'restore_command.dart';
 import 'summarize.dart';
+import 'plural.dart';
 
 /// Lines of failing test output kept for the result and the explanation.
 const int bisectOutputTailLines = 40;
@@ -254,7 +255,7 @@ Future<int> runBisectCommand(DocContext context) async {
   final ignored = ordered.length - scoped.length;
 
   say(
-    'Bisecting ${candidates.length} checkpoint(s) in ${context.workspace} with: $test',
+    'Bisecting ${plural(candidates.length, 'checkpoint')} in ${context.workspace} with: $test',
   );
   for (final checkpoint in skipped) {
     say(
@@ -262,7 +263,9 @@ Future<int> runBisectCommand(DocContext context) async {
     );
   }
   if (ignored > 0 && !(args['all'] as bool)) {
-    say('Ignored $ignored non-agent checkpoint(s); add --all to include them.');
+    say(
+      'Ignored ${plural(ignored, 'non-agent checkpoint')}; add --all to include them.',
+    );
   }
   if (candidates.isEmpty) {
     context.log('There are no closed checkpoints to bisect.');
@@ -423,7 +426,9 @@ Future<int> runBisectCommand(DocContext context) async {
     } else {
       say(message);
       if (failing != null && failing.isNotEmpty) say('Test output:\n$failing');
-      say('${records.length} probe(s), ${seconds}s. No model was called.');
+      say(
+        '${plural(records.length, 'probe')}, ${seconds}s. No model was called.',
+      );
     }
     return 1;
   }
@@ -484,7 +489,7 @@ Future<int> runBisectCommand(DocContext context) async {
     say('Last good point: ${lastGoodPoint.description}');
     say('Failing test output (tail):\n$failing');
     say(
-      '${records.length} probe(s) for ${candidates.length} turn(s), ${seconds}s.',
+      '${plural(records.length, 'probe')} for ${plural(candidates.length, 'turn')}, ${seconds}s.',
     );
   }
 
@@ -526,7 +531,7 @@ Future<int> runBisectCommand(DocContext context) async {
       say(
         'Would send to ${prepared.route.provider.id} (${prepared.route.model}). Nothing was sent.',
       );
-      say('Redacted: ${prepared.redactionCount} item(s)');
+      say('Redacted: ${plural(prepared.redactionCount, 'item')}');
       say(const JsonEncoder.withIndent('  ').convert(prepared.body));
     } else {
       try {
@@ -543,7 +548,7 @@ Future<int> runBisectCommand(DocContext context) async {
         if (!json) {
           say('');
           say(
-            'Why (${call.result.provider} ${call.result.model}; ${call.result.promptTokens} in / ${call.result.completionTokens} out; ${call.redactionCount} item(s) redacted${call.fellBackFrom == null ? '' : '; fell back from ${call.fellBackFrom}'}):',
+            'Why (${call.result.provider} ${call.result.model}; ${call.result.promptTokens} in / ${call.result.completionTokens} out; ${plural(call.redactionCount, 'item')} redacted${call.fellBackFrom == null ? '' : '; fell back from ${call.fellBackFrom}'}):',
           );
           say(explanation);
         }
@@ -562,18 +567,9 @@ Future<int> runBisectCommand(DocContext context) async {
     return 0;
   }
 
-  // The next step is offered, never taken automatically.
+  // The next step is offered, never taken automatically: the restore's own
+  // one-line question ("Undo this muse turn? …  [y/N]") is the offer.
   say('');
-  if (yes) {
-    say('Restore to before this turn? [y/N] yes (--yes)');
-  } else {
-    context.out.write('Restore to before this turn? [y/N] ');
-    final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
-    if (answer != 'y' && answer != 'yes') {
-      say('Not restored. You can run: doc restore ${bad.id}');
-      return 0;
-    }
-  }
   return restoreCheckpoint(context, bad.id);
 }
 

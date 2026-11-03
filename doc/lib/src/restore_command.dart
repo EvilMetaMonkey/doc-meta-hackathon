@@ -1,7 +1,10 @@
+import 'package:path/path.dart' as p;
+
 import 'cli.dart';
 import 'dmc_client.dart';
 import 'lesson_commands.dart';
 import 'nl_restore_command.dart';
+import 'plural.dart';
 
 /// A dmc checkpoint ID (`cp_<base36 time>_<hex>`): `doc restore` with one
 /// keeps the checkpoint flow; anything else is a natural-language request.
@@ -51,12 +54,8 @@ Future<int> restoreCheckpoint(DocContext context, String id) async {
     id,
   ], workspace: context.workspace);
   final checkpoint = (show['data'] as Map?)?['checkpoint'];
-  if (checkpoint is Map) {
-    final agent = checkpoint['agent'];
-    out.writeln(
-      'Checkpoint $id (${checkpoint['status']}${agent is Map ? ', ${agent['name']} turn' : ''}): ${checkpoint['label'] ?? '(no label)'}',
-    );
-  }
+  final agent = checkpoint is Map ? checkpoint['agent'] : null;
+  final agentName = agent is Map ? agent['name'] as String? : null;
 
   final preview = await dmc.runJson([
     'checkpoint',
@@ -75,8 +74,10 @@ Future<int> restoreCheckpoint(DocContext context, String id) async {
     ...(data['dataErrors'] as List? ?? const []).whereType<Map>(),
   ];
 
-  if (actions.isNotEmpty) {
-    out.writeln('Restore would change ${actions.length} file(s):');
+  // One file: the question says it all. Several: the list comes first (a
+  // full-screen UI keeps it under details).
+  if (actions.length > 1) {
+    out.writeln('Restore would change ${plural(actions.length, 'file')}:');
     for (final action in actions) {
       out.writeln('  - ${action['path']}: ${describeRestoreAction(action)}');
     }
@@ -121,7 +122,13 @@ Future<int> restoreCheckpoint(DocContext context, String id) async {
 
   if (!await _ask(
     context,
-    'Restore these files? [y/N] ',
+    restoreQuestion('Undo ${turnPhrase(agentName)}?', [
+      for (final action in actions)
+        (
+          path: '${action['path']}',
+          action: describeRestoreAction(action, short: true),
+        ),
+    ]),
     yes: yes,
     byDefault: false,
   )) {
@@ -154,7 +161,7 @@ Future<int> restoreCheckpoint(DocContext context, String id) async {
   out.writeln(
     appliedData['noOp'] == true
         ? 'Nothing needed restoring.'
-        : 'Restored ${actions.length} file(s) through dmc (operation ${appliedData['operationId']}).',
+        : 'Restored ${plural(actions.length, 'file')} through dmc (operation ${appliedData['operationId']}).',
   );
 
   if (context.args['no-lesson'] as bool) return 0;
@@ -180,13 +187,44 @@ Future<int> restoreCheckpoint(DocContext context, String id) async {
   return 0;
 }
 
-/// A restore action in plain words.
-String describeRestoreAction(Map action) {
+/// A restore action in plain words. [short]: for the one-line question,
+/// where "the turn" is already named ("…: put back the version from
+/// before it").
+String describeRestoreAction(Map action, {bool short = false}) {
   final expected = (action['expected'] as Map?)?['kind'];
   final intended = (action['intended'] as Map?)?['kind'];
   if (intended == 'absent') return 'delete it (the turn created it)';
   if (expected == 'absent') return 'recreate it (the turn deleted it)';
-  return 'put back the version from before the turn';
+  return 'put back the version from before ${short ? 'it' : 'the turn'}';
+}
+
+/// "this muse turn" for an agent's turn, else "this change".
+String turnPhrase(String? agentName) => agentName == null
+    ? 'this change'
+    : 'this ${switch (agentName) {
+        'claude-code' => 'claude',
+        'muse-code' => 'muse',
+        final other => other,
+      }} turn';
+
+/// The one shape of a restore question, on one line:
+/// "Undo this muse turn? README.md: put back the version from before it  [y/N] "
+/// or "Undo this muse turn? 3 files change (money.py, checkout.py, +1)  [y/N] ".
+String restoreQuestion(
+  String lead,
+  List<({String path, String action})> files,
+) {
+  final String what;
+  if (files.length == 1) {
+    what = '${files.single.path}: ${files.single.action}';
+  } else {
+    final names = [
+      for (final file in files.take(2)) p.basename(file.path),
+      if (files.length > 2) '+${files.length - 2}',
+    ];
+    what = '${plural(files.length, 'file')} change (${names.join(', ')})';
+  }
+  return '$lead $what  [y/N] ';
 }
 
 Future<bool> _ask(

@@ -13,6 +13,7 @@ import 'lesson_commands.dart';
 import 'restore_command.dart';
 import 'model_client.dart';
 import 'model_router.dart';
+import 'plural.dart';
 import 'summarize.dart';
 import 'talk_command.dart';
 import 'timelines_command.dart';
@@ -544,32 +545,72 @@ Future<int> _summarize(DocContext context) async {
       'summary',
       messages,
       maxTokens: summaryMaxTokens,
+      responseFormat: summaryResponseFormat,
     );
     context.out
       ..writeln(
         'Would send to ${prepared.route.provider.id} (${prepared.route.model}) at '
         '${prepared.route.provider.baseUrl}/chat/completions. Nothing was sent.',
       )
-      ..writeln('Redacted: ${prepared.redactionCount} item(s)')
+      ..writeln('Redacted: ${plural(prepared.redactionCount, 'item')}')
       ..writeln(const JsonEncoder.withIndent('  ').convert(prepared.body));
     return 0;
   }
 
   final route = context.router.resolve('summary');
+  final agentName = checkpointAgentName(show);
   try {
-    final call = await context.router.call(
-      'summary',
-      messages,
-      maxTokens: summaryMaxTokens,
-    );
+    // A JSON {title, summary}; one retry, then the old free-text answer.
+    var sent = messages;
+    var promptTokens = 0;
+    var completionTokens = 0;
+    var cost = 0.0;
+    var attempts = 0;
+    late RoleCallResult call;
+    ({String title, String summary})? answer;
+    for (var attempt = 1; attempt <= 2 && answer == null; attempt++) {
+      try {
+        call = await context.router.call(
+          'summary',
+          sent,
+          maxTokens: summaryMaxTokens,
+          responseFormat: summaryResponseFormat,
+        );
+      } on ModelCallException {
+        // The retry failed: keep the first answer, as free text.
+        if (attempt == 1) rethrow;
+        break;
+      }
+      attempts = attempt;
+      promptTokens += call.result.promptTokens;
+      completionTokens += call.result.completionTokens;
+      cost += call.costUsd;
+      try {
+        answer = parseSummaryAnswer(call.result.content, agentName: agentName);
+      } on SummaryAnswerError catch (error) {
+        if (attempt == 1) {
+          sent = [
+            ...messages,
+            ChatMessage('assistant', call.result.content),
+            ChatMessage(
+              'user',
+              'That answer was not usable: ${error.message} Answer again with only the JSON object {"title": ..., "summary": ...}, following the rules.',
+            ),
+          ];
+        }
+      }
+    }
     final result = call.result;
+    if (answer != null) context.out.writeln('Title: ${answer.title}');
     context.out
-      ..writeln(result.content)
+      ..writeln(answer?.summary ?? freeTextSummary(result.content))
       ..writeln('')
       ..writeln(
-        '(${result.provider} ${result.model}; ${result.promptTokens} in / ${result.completionTokens} out; '
-        '${context.config.providers[result.provider]?.billing == ProviderBilling.gpuTime ? 'billed by GPU time' : '\$${call.costUsd.toStringAsFixed(6)}'}; ${result.latency.inMilliseconds} ms; '
-        '${call.redactionCount} item(s) redacted${call.fellBackFrom == null ? '' : '; fell back from ${call.fellBackFrom}'})',
+        '(${result.provider} ${result.model}; $promptTokens in / $completionTokens out; '
+        '${context.config.providers[result.provider]?.billing == ProviderBilling.gpuTime ? 'billed by GPU time' : '\$${cost.toStringAsFixed(6)}'}; ${result.latency.inMilliseconds} ms; '
+        '${plural(call.redactionCount, 'item')} redacted'
+        '${attempts > 1 ? '; asked twice' : ''}${answer == null ? '; no title, free-text answer' : ''}'
+        '${call.fellBackFrom == null ? '' : '; fell back from ${call.fellBackFrom}'})',
       );
     return 0;
   } on ModelCallException catch (error) {
@@ -655,7 +696,7 @@ Future<int> _status(DocContext context) async {
   );
   context.out
     ..writeln(
-      'Workspace ${(listed['workspace'] as Map?)?['path'] ?? context.workspace}: ${items.length} checkpoint(s).',
+      'Workspace ${(listed['workspace'] as Map?)?['path'] ?? context.workspace}: ${plural(items.length, 'checkpoint')}.',
     )
     ..writeln(
       active.isEmpty

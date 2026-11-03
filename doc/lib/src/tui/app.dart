@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../doctor_command.dart';
+import '../restore_command.dart' show restoreQuestion, turnPhrase;
 import '../talk_command.dart';
 import 'keys.dart';
 import 'model.dart';
@@ -81,7 +82,9 @@ abstract class TuiBackend {
   Future<List<LessonItem>> lessons();
 
   String? cachedSummary(String checkpointId);
-  void saveSummary(String checkpointId, String text, String? footer);
+
+  /// Cache `doc summarize`'s output ([parseSummaryOutput] reads it back).
+  void saveSummary(String checkpointId, String output);
 
   /// The workspace's `bisectTest` setting, else the last bisect's test.
   String? defaultTest();
@@ -169,6 +172,9 @@ class TuiApp {
   final Duration summaryDelay;
   final Duration splashFor;
 
+  /// How long a bar note stays (it also clears on the next pane key).
+  final Duration noteFor;
+
   /// Opens the log file for an action; returns the sink and its path.
   final ({StringSink sink, String path, Future<void> Function() close})
   Function(String name)
@@ -179,6 +185,7 @@ class TuiApp {
   Completer<String?>? _answer;
   Timer? _poll;
   Timer? _summaryTimer;
+  Timer? _noteTimer;
   bool _busy = false;
   final Map<String, String> _logs = {};
 
@@ -193,6 +200,7 @@ class TuiApp {
     this.pollEvery = const Duration(seconds: 3),
     this.summaryDelay = const Duration(milliseconds: 300),
     this.splashFor = const Duration(milliseconds: 1200),
+    this.noteFor = const Duration(seconds: 5),
     bool splash = true,
     String? dmcVersion,
   }) : state = TuiState(HeaderStatus(workspaceName: backend.workspaceName)) {
@@ -224,6 +232,7 @@ class TuiApp {
     final code = await _done.future;
     _poll?.cancel();
     _summaryTimer?.cancel();
+    _noteTimer?.cancel();
     await _keys?.cancel();
     return code;
   }
@@ -261,6 +270,19 @@ class TuiApp {
       }
       state.emptyReason = null;
       final turns = turnsFromList(listed);
+      // Cached titles for the list; a summary (and title) is only asked
+      // for when a turn is selected.
+      for (final turn in turns) {
+        final detail = state.details.putIfAbsent(turn.id, TurnDetail.new);
+        if (detail.summary != null) continue;
+        final cached = backend.cachedSummary(turn.id);
+        if (cached == null) continue;
+        final parsed = parseSummaryOutput(cached);
+        detail
+          ..title = parsed.title
+          ..summary = parsed.text
+          ..summaryFooter = parsed.footer;
+      }
       state.turns = turns;
       state.turnsLoaded = true;
       state.firstBad =
@@ -324,7 +346,9 @@ class TuiApp {
     String? answer;
     var done = false;
     if (question.yesNo) {
-      if (key.isChar('y') || key.isChar('Y')) {
+      if (key.isChar('d') && question.context.isNotEmpty) {
+        question.showDetails = !question.showDetails;
+      } else if (key.isChar('y') || key.isChar('Y')) {
         answer = 'y';
         done = true;
       } else if (key.isChar('n') ||
@@ -418,6 +442,9 @@ class TuiApp {
   }
 
   void _paneKey(KeyEvent key) {
+    // The note was about what just happened; the next key moves on (and
+    // never carries it into another pane).
+    _clearNote();
     if (key.kind == KeyKind.space) {
       unawaited(talk());
       return;
@@ -435,11 +462,7 @@ class TuiApp {
       return;
     }
     if (key.kind == KeyKind.escape) {
-      if (state.pane != PaneKind.turns) {
-        state.pane = PaneKind.turns;
-      } else {
-        state.note = null;
-      }
+      if (state.pane != PaneKind.turns) state.pane = PaneKind.turns;
       return;
     }
     if (key.isChar('o')) {
@@ -451,8 +474,7 @@ class TuiApp {
       return;
     }
     if (_busy && !key.isChar('?')) {
-      state.note = 'Doc is busy with the last action; one moment.';
-      state.noteTone = Tone.warn;
+      _note('Doc is busy with the last action; one moment.', Tone.warn);
       return;
     }
     switch (state.pane) {
@@ -635,10 +657,23 @@ class TuiApp {
     redraw();
   }
 
+  /// A one-line note in the bar. It clears after [noteFor], or on the next
+  /// pane key.
   void _note(String text, [Tone tone = Tone.normal]) {
     state.note = text;
     state.noteTone = tone;
+    _noteTimer?.cancel();
+    _noteTimer = Timer(noteFor, () {
+      if (state.note != text) return;
+      state.note = null;
+      redraw();
+    });
     redraw();
+  }
+
+  void _clearNote() {
+    _noteTimer?.cancel();
+    state.note = null;
   }
 
   /// The command bar: `doc …` (or a bare Doc command), or a read-only /
@@ -711,6 +746,7 @@ class TuiApp {
     if (detail.summary == null && cached != null) {
       final parsed = parseSummaryOutput(cached);
       detail
+        ..title = parsed.title
         ..summary = parsed.text
         ..summaryFooter = parsed.footer;
     }
@@ -772,9 +808,10 @@ class TuiApp {
     if (run.code == 0) {
       final parsed = parseSummaryOutput(run.output);
       detail
+        ..title = parsed.title
         ..summary = parsed.text
         ..summaryFooter = parsed.footer;
-      backend.saveSummary(id, parsed.text, parsed.footer);
+      backend.saveSummary(id, run.output);
     } else {
       detail.summaryError = 'No summary (o shows why).';
     }
@@ -792,7 +829,8 @@ class TuiApp {
       summary.isEmpty ? 'Restore finished.' : summary.single,
       run.code == 0 ? Tone.good : Tone.bad,
     );
-    state.pane = PaneKind.turns;
+    // Declined (bisect's offer): stay where the question was asked.
+    if (run.output.contains('Restored ')) state.pane = PaneKind.turns;
     await refreshTurns();
   }
 
@@ -838,10 +876,17 @@ class TuiApp {
       );
       return;
     }
-    final yes = await confirm([
-      'Redo ${shortId(turn.id)} (${turn.who}): ${screenLabel(turn.label)}',
-      for (final a in actions) '  ${a['path']}: put back the turn\'s version',
-    ], 'Redo this turn (${actions.length} file(s))? [y/N]');
+    final yes = await confirm(
+      [
+        if (actions.length > 1)
+          for (final a in actions)
+            '  ${a['path']}: put back the turn\'s version',
+      ],
+      restoreQuestion('Redo ${turnPhrase(turn.agent)}?', [
+        for (final a in actions)
+          (path: '${a['path']}', action: 'put back the turn\'s version'),
+      ]).trimRight(),
+    );
     if (!yes) {
       _note('Nothing was changed.', Tone.dim);
       return;
@@ -932,11 +977,8 @@ class TuiApp {
     _fillBisect(pane, run.output, candidates);
     redraw();
     if (pane.found && pane.firstBad != null) {
-      final yes = await confirm(
-        const [],
-        'Restore to before this turn? It undoes ${shortId(pane.firstBad!)} through dmc. [y/N]',
-      );
-      if (yes) await restoreTurn(pane.firstBad!);
+      // doc restore's own one-line question is the offer.
+      await restoreTurn(pane.firstBad!);
     }
     await refreshTurns();
   }
@@ -1099,9 +1141,10 @@ class TuiApp {
     final parsed = parseSummaryOutput(after);
     if (parsed.text.isNotEmpty) {
       state.details.putIfAbsent(id, TurnDetail.new)
+        ..title = parsed.title
         ..summary = parsed.text
         ..summaryFooter = parsed.footer;
-      backend.saveSummary(id, parsed.text, parsed.footer);
+      backend.saveSummary(id, after);
     }
     state.pane = PaneKind.turns;
   }

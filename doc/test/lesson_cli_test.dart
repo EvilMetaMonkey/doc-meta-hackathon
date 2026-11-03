@@ -329,7 +329,7 @@ void main() {
         reason: '$err',
       );
       expect('$out', startsWith('Before you start: keep greet()'));
-      expect('$out', contains('Matched 1 lesson(s) on app.py'));
+      expect('$out', contains('Matched 1 lesson on app.py'));
       expect('$out', contains('(score 1: app.py)'));
       final body = modal.requests.single.body!;
       expect(
@@ -371,8 +371,17 @@ void main() {
     );
 
     answers.add('n');
+    out.clear();
     expect(await doc(['start', 'muse-code', task], env: env), 0);
-    expect('$out', contains("Add this to the agent's first prompt? [y/N]"));
+    // The one shape: the brief, "From: <title>", then [y/N]; the lesson's
+    // ID and score only after the answer.
+    final asked = '$out'.split("Add this to the agent's first prompt? [y/N]");
+    expect(asked, hasLength(2));
+    expect(
+      asked.first,
+      "Before you start: keep the parameter name.\n\nFrom: Keep greet()'s parameter name\n",
+    );
+    expect(asked.last, contains('(score 1: app.py)'));
     expect(record.readAsStringSync(), task);
 
     answers.add('y');

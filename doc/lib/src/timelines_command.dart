@@ -15,6 +15,7 @@ import 'model_client.dart';
 import 'model_router.dart';
 import 'probe_runner.dart';
 import 'timelines.dart';
+import 'plural.dart';
 
 /// Room for Wonder's reasoning plus N short plans.
 const int timelinePlannerMaxTokens = 4000;
@@ -328,7 +329,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   final baseDescription =
       '$state state of checkpoint $baseId (${(baseItem['agent'] as Map?)?['name'] ?? baseItem['source']})';
   say('Base: $baseDescription: ${baseLabel ?? '(no label)'}');
-  say('  ${exportFiles.length} file(s), exported by dmc to $exportDir');
+  say('  ${plural(exportFiles.length, 'file')}, exported by dmc to $exportDir');
 
   // With --from-bisect, the planner gets what bisect found about the base.
   TimelineBisectFacts? bisectFacts;
@@ -347,7 +348,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       explanation: last['explanation'] as String?,
     );
     say(
-      'Bisect facts for the planner: that turn\'s prompt, its ${changedFiles.length} changed file(s), its diff${bisectFacts.explanation == null ? '' : ' and bisect\'s explanation'}.',
+      'Bisect facts for the planner: that turn\'s prompt, its ${plural(changedFiles.length, 'changed file')}, its diff${bisectFacts.explanation == null ? '' : ' and bisect\'s explanation'}.',
     );
   }
 
@@ -396,7 +397,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
     say(
       'Would send to ${prepared.route.provider.id} (${prepared.route.model}). Nothing was sent.',
     );
-    say('Redacted: ${prepared.redactionCount} item(s)');
+    say('Redacted: ${plural(prepared.redactionCount, 'item')}');
     context.out.writeln(
       const JsonEncoder.withIndent('  ').convert(prepared.body),
     );
@@ -462,7 +463,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
   };
   say('');
   say(
-    'Plan (${call.result.provider} ${call.result.model}; $plannerIn in / $plannerOut out; \$${plannerCost.toStringAsFixed(4)}; ${call.redactionCount} item(s) redacted):',
+    'Plan (${call.result.provider} ${call.result.model}; $plannerIn in / $plannerOut out; \$${plannerCost.toStringAsFixed(4)}; ${plural(call.redactionCount, 'item')} redacted):',
   );
   for (var i = 0; i < approaches.length; i++) {
     final a = approaches[i];
@@ -548,7 +549,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
       ? agentModel
       : configured;
   final perStep =
-      '$n agent(s) × $maxSteps step(s) × ~${museInputTokensPerStep ~/ 1000}k input + $museOutputTokensPerStep output tokens per step '
+      '${plural(n, 'agent')} × ${plural(maxSteps, 'step')} × ~${museInputTokensPerStep ~/ 1000}k input + $museOutputTokensPerStep output tokens per step '
       '(measured with muse exec 1.4.14), with no cache discount (real runs are usually far lower: most input is cached)';
   final single = model == null
       ? null
@@ -851,7 +852,7 @@ Future<int> _run(DocContext context, TimelineDeps deps) async {
         TimelineStatus.stopped => 'stopped',
         TimelineStatus.stalled => 'stopped (stalled)',
         _ => outcome.stepLimit ? 'stopped at the step limit' : 'failed',
-      }} after ${clockText(t.seconds)}, ${t.steps} step(s)${t.costUsd == null ? '' : ', \$${t.costUsd!.toStringAsFixed(4)}'}${t.reason == null ? '' : ' (${t.reason})'}',
+      }} after ${clockText(t.seconds)}, ${plural(t.steps, 'step')}${t.costUsd == null ? '' : ', \$${t.costUsd!.toStringAsFixed(4)}'}${t.reason == null ? '' : ' (${t.reason})'}',
     );
 
     // The agent's result, committed so the diff is reviewable.
@@ -1035,7 +1036,7 @@ int _list(DocContext context) {
   for (final run in runs) {
     final passed = run.timelines.where((t) => t.test?.passed ?? false).length;
     context.out.writeln(
-      '${run.id}  ${run.status}  ${run.timelines.length} timeline(s), $passed passing${run.picked == null ? '' : ', picked ${run.picked}'}  ${run.repo}  ${run.task}',
+      '${run.id}  ${run.status}  ${plural(run.timelines.length, 'timeline')}, $passed passing${run.picked == null ? '' : ', picked ${run.picked}'}  ${run.repo}  ${run.task}',
     );
   }
   return 0;
@@ -1110,7 +1111,7 @@ Future<int> _pick(DocContext context) async {
           ? 'not run'
           : timeline.test!.passed
           ? 'PASS'
-          : 'FAIL'}; branch ${timeline.branch}; ${timeline.files.length} file(s) changed against the base.',
+          : 'FAIL'}; branch ${timeline.branch}; ${plural(timeline.files.length, 'file')} changed against the base.',
     )
     ..writeln('')
     ..writeln(
@@ -1163,7 +1164,7 @@ Future<int> _clean(DocContext context) async {
     return 0;
   }
   final question =
-      'Remove ${present.length} worktree folder(s) of ${run.id}? The branches (${run.timelines.map((t) => t.branch).join(', ')}) are kept. [y/N] ';
+      'Remove ${plural(present.length, 'worktree folder')} of ${run.id}? The branches (${run.timelines.map((t) => t.branch).join(', ')}) are kept. [y/N] ';
   if (context.args['yes'] as bool) {
     context.out.writeln('${question}yes (--yes)');
   } else {
@@ -1320,7 +1321,7 @@ Future<bool> _judge(
     'judgedAt': DateTime.now().toUtc().toIso8601String(),
   };
   say(
-    'Judgment (${call.result.provider} ${call.result.model}; $promptTokens in / $completionTokens out; \$${cost.toStringAsFixed(4)}; ${call.redactionCount} item(s) redacted):',
+    'Judgment (${call.result.provider} ${call.result.model}; $promptTokens in / $completionTokens out; \$${cost.toStringAsFixed(4)}; ${plural(call.redactionCount, 'item')} redacted):',
   );
   for (final line in timelineJudgmentLines(run, judgment)) {
     say(line);

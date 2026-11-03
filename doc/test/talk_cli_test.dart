@@ -274,7 +274,12 @@ void main() {
     expect(await doc(['talk', '--file', wav(0.4)]), 0, reason: '$err');
     final text = '$out';
     expect(text, contains('Plan: go back to before ${ids[0]}'));
-    expect(text, contains('Apply this restore (2 step(s), 2 file(s))? [y/N]'));
+    expect(
+      text,
+      contains(
+        'Go back to before this change (2 steps undone)? 2 files change (app.py, auth.py)  [y/N]',
+      ),
+    );
     final restorePrompt =
         ((voice.chatRequests.single.body!['messages'] as List)[1]
                 as Map)['content']

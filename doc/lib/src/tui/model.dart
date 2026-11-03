@@ -149,6 +149,32 @@ List<FileChange> filesFromDiff(String diff) {
   return files;
 }
 
+/// The diff for the detail pane: a dim header per file ("money.py"), then
+/// its lines from the first change (leading context and hunk markers are
+/// skipped), at most [max] lines in all.
+List<Line> diffPreview(String diff, int max) {
+  final header = RegExp(r'^--- (.+) \(([^)]+)\)$');
+  final rows = <Line>[];
+  var leading = true;
+  for (final line in diff.trimRight().split('\n')) {
+    if (rows.length >= max) break;
+    final match = header.firstMatch(line);
+    if (match != null) {
+      rows.add(plain(match[1]!, Tone.dim));
+      leading = true;
+      continue;
+    }
+    final change =
+        (line.startsWith('+') && !line.startsWith('+++')) ||
+        (line.startsWith('-') && !line.startsWith('---')) ||
+        line.startsWith('(');
+    if (leading && !change) continue;
+    leading = false;
+    rows.add(diffLine(line));
+  }
+  return rows;
+}
+
 /// A diff line coloured: red `-`, green `+`, dim headers and context.
 Line diffLine(String line) {
   if (line.startsWith('--- ') || line.startsWith('@@')) {
@@ -161,6 +187,8 @@ Line diffLine(String line) {
 
 /// What the detail pane knows about one turn.
 class TurnDetail {
+  /// A short title for the turn, from the same call as [summary].
+  String? title;
   String? summary;
 
   /// The model/tokens/cost line (shown under `d`).
@@ -176,17 +204,25 @@ class TurnDetail {
   List<FileChange> get files => diff == null ? const [] : filesFromDiff(diff!);
 }
 
-/// The summary text and its footer from `doc summarize` output: the
-/// answer, a blank line, then "(provider model; … )".
-({String text, String? footer}) parseSummaryOutput(String output) {
-  final lines = output.trimRight().split('\n');
+/// The title, summary text and footer from `doc summarize` output:
+/// "Title: …" (when the model gave one), the answer, a blank line, then
+/// "(provider model; … )".
+({String? title, String text, String? footer}) parseSummaryOutput(
+  String output,
+) {
+  final lines = output.trim().split('\n');
   String? footer;
+  String? title;
   if (lines.isNotEmpty &&
       lines.last.startsWith('(') &&
       lines.last.endsWith(')')) {
     footer = lines.removeLast();
   }
-  return (text: lines.join('\n').trim(), footer: footer);
+  if (lines.isNotEmpty && lines.first.startsWith('Title: ')) {
+    title = lines.removeAt(0).substring('Title: '.length).trim();
+    if (title.isEmpty) title = null;
+  }
+  return (title: title, text: lines.join('\n').trim(), footer: footer);
 }
 
 /// Header facts, from the same checks as `doc doctor` (no model calls).
@@ -415,6 +451,18 @@ class Question {
   /// `[y/N]` questions take y/n; others take a line of text.
   final bool yesNo;
   String value;
+
+  /// `d` shows the context of a one-line question.
+  bool showDetails = false;
+
+  /// A restore or redo question says everything on its one line ("Undo
+  /// this muse turn? README.md: put back …  [y/N]"); its per-file list
+  /// stays under `d`.
+  bool get oneLine =>
+      yesNo && RegExp(r'^(Undo|Redo|Go back to before) ').hasMatch(prompt);
+
+  /// The context shown in the dialog.
+  List<String> get shownContext => oneLine && !showDetails ? const [] : context;
 
   Question({
     required this.context,

@@ -377,7 +377,7 @@ void main() {
       {'path': 'state.txt', 'added': 1, 'removed': 1},
     ]);
     expect((timelines[1]['test'] as Map)['passed'], isFalse);
-    expect(timelines[1]['reason'], contains('2 step(s)'));
+    expect(timelines[1]['reason'], contains('2 steps'));
     expect((timelines[2]['test'] as Map)['passed'], isFalse);
     // Killed before run.usage: the steps are counted from the events.
     expect(timelines[2]['steps'], 4);
@@ -389,16 +389,13 @@ void main() {
     expect(text, contains('[timeline 1] running: Put the value back'));
     expect(text, contains('[timeline 2] stopped at the step limit'));
     expect(text, contains('[timeline 3] timed out'));
-    expect(
-      text,
-      contains('[1] Put the value back\n    agent: done, 3 step(s)'),
-    );
+    expect(text, contains('[1] Put the value back\n    agent: done, 3 steps'));
     expect(text, contains('    files: state.txt +1 −1\n    tests: PASS'));
     expect(
       text,
-      contains('[2] Rewrite the module\n    agent: step limit, 2 step(s)'),
+      contains('[2] Rewrite the module\n    agent: step limit, 2 steps'),
     );
-    expect(text, contains('[3] Think first\n    agent: timed out, 4 step(s)'));
+    expect(text, contains('[3] Think first\n    agent: timed out, 4 steps'));
     expect(text, contains('Pick one with: doc timelines pick $id <k>'));
 
     // Branches hold each agent's commit; the user's repo is untouched.
@@ -441,7 +438,7 @@ void main() {
     expect('$out', contains('(archived)'));
     out.clear();
     expect(await doc(['timelines', 'list']), 0);
-    expect('$out', contains('$id  done  3 timeline(s), 1 passing, picked 1'));
+    expect('$out', contains('$id  done  3 timelines, 1 passing, picked 1'));
 
     // clean: worktree folders go after a yes; branches stay.
     out.clear();
@@ -623,7 +620,7 @@ void main() {
     expect(
       text,
       contains(
-        '2 step(s) (waiting for approval to run a shell command (Doc runs agents without a shell))',
+        '2 steps (waiting for approval to run a shell command (Doc runs agents without a shell))',
       ),
     );
     expect(text, contains('stopped after 2 s without progress'));

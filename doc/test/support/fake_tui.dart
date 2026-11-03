@@ -183,8 +183,7 @@ class FakeBackend implements TuiBackend {
   String? cachedSummary(String id) => summaries[id];
 
   @override
-  void saveSummary(String id, String text, String? footer) =>
-      summaries[id] = '$text\n\n${footer ?? ''}';
+  void saveSummary(String id, String output) => summaries[id] = output;
 
   @override
   String? defaultTest() => 'python3 -m unittest -q';
@@ -198,6 +197,7 @@ class FakeBackend implements TuiBackend {
   FakeHost host,
   FakeBackend backend, {
   bool splash = false,
+  Duration noteFor = const Duration(seconds: 5),
 }) {
   final logs = <String, StringBuffer>{};
   final app = TuiApp(
@@ -208,6 +208,7 @@ class FakeBackend implements TuiBackend {
     pollEvery: const Duration(hours: 1),
     summaryDelay: const Duration(milliseconds: 5),
     splashFor: const Duration(milliseconds: 50),
+    noteFor: noteFor,
     openLog: (name) {
       final buffer = StringBuffer();
       final path = '/logs/$name-${logs.length}.log';

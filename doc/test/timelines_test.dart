@@ -308,12 +308,12 @@ void main() {
     final lines = timelineComparison(sampleRun());
     expect(lines, [
       '[1] Fix helper',
-      '    agent: done, 5 step(s), 1:12, \$0.0031',
+      '    agent: done, 5 steps, 1:12, \$0.0031',
       '    files: money.py +1 −1',
       '    tests: PASS (0.2s)',
       '    branch: doc/timeline/tl-1/1  (not picked yet)',
       '[2] Round callers',
-      '    agent: step limit, 8 step(s), 2:10 (model did not reach a terminal state within 8 step(s))',
+      '    agent: step limit, 8 steps, 2:10 (model did not reach a terminal state within 8 steps)',
       '    files: money.py +4 −0, b.png (binary)  (total +4 −0)',
       '    tests: FAIL (0.3s)',
       '    branch: doc/timeline/tl-1/2  (not picked yet)',
@@ -321,7 +321,7 @@ void main() {
       '      | AssertionError: 20.0 != 19.99',
       '      | FAILED (failures=1)',
       '[3] Decimal',
-      '    agent: timed out, 0 step(s), 10:00 (no result within 10 min)',
+      '    agent: timed out, 0 steps, 10:00 (no result within 10 min)',
       '    files: no changes',
       '    tests: not run',
       '    branch: doc/timeline/tl-1/3  (not picked yet)',
@@ -483,10 +483,7 @@ void main() {
           judged([(1, 9, 'a'), (1, 4, 'b'), (3, 1, 'c')], 1),
           'ranked twice',
         );
-        refused(
-          judged([(1, 9, 'a'), (2, 4, 'b')], 1),
-          'leaves out timeline(s) 3',
-        );
+        refused(judged([(1, 9, 'a'), (2, 4, 'b')], 1), 'leaves out timeline 3');
         refused(
           judged([(1, 11, 'a'), (2, 4, 'b'), (3, 1, 'c')], 1),
           'from 0 to 10',
@@ -667,7 +664,7 @@ void main() {
       expect(
         timelineComparison(back).join('\n'),
         contains(
-          'agent: stalled, 5 step(s), 1:12, \$0.0031 (no progress for 90 s)',
+          'agent: stalled, 5 steps, 1:12, \$0.0031 (no progress for 90 s)',
         ),
       );
     });

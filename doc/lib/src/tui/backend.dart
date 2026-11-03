@@ -16,6 +16,7 @@ import '../dmc_client.dart';
 import '../doctor_command.dart';
 import '../lesson_commands.dart';
 import '../lessons.dart';
+import '../summarize.dart' show summaryPromptVersion;
 import 'app.dart';
 import 'model.dart';
 
@@ -151,8 +152,16 @@ class DocBackend implements TuiBackend {
     ];
   }
 
-  File _summaryFile(String id) =>
-      File(p.join(docDataDirectory(context.env), 'summaries', '$id.txt'));
+  // The prompt version is in the path, so a summary from an older prompt
+  // is not reused.
+  File _summaryFile(String id) => File(
+    p.join(
+      docDataDirectory(context.env),
+      'summaries',
+      'v$summaryPromptVersion',
+      '$id.txt',
+    ),
+  );
 
   @override
   String? cachedSummary(String checkpointId) {
@@ -161,10 +170,10 @@ class DocBackend implements TuiBackend {
   }
 
   @override
-  void saveSummary(String checkpointId, String text, String? footer) {
+  void saveSummary(String checkpointId, String output) {
     final file = _summaryFile(checkpointId);
     file.parent.createSync(recursive: true);
-    file.writeAsStringSync('$text\n${footer == null ? '' : '\n$footer\n'}');
+    file.writeAsStringSync('${output.trim()}\n');
   }
 
   @override

@@ -10,6 +10,7 @@ import 'lessons.dart';
 import 'model_client.dart';
 import 'model_router.dart';
 import 'summarize.dart';
+import 'plural.dart';
 
 /// Room for reasoning plus a ~150-word draft or a ~100-word brief.
 const int lessonMaxTokens = 2000;
@@ -379,7 +380,7 @@ Future<int> draftLesson(
     ..writeln(file.readAsStringSync())
     ..writeln('Draft saved: ${file.path}')
     ..writeln(
-      '(${call.footer}; ${call.redactions + title.count + body.count} item(s) redacted)',
+      '(${call.footer}; ${plural(call.redactions + title.count + body.count, 'item')} redacted)',
     )
     ..writeln(
       'Review it with "doc lesson edit ${lesson.id}", then "doc lesson approve ${lesson.id}" or "doc lesson reject ${lesson.id}".',
@@ -621,7 +622,7 @@ Future<BriefResult?> buildBrief(
       matches,
       candidates,
       brief: _limitWords(_asBrief(call.content), 100),
-      footer: '${call.footer}; ${call.redactions} item(s) redacted',
+      footer: '${call.footer}; ${plural(call.redactions, 'item')} redacted',
       drafts: matched.drafts,
     );
   } on ModelCallException catch (error) {
@@ -693,7 +694,7 @@ Future<Set<String>> _knownFiles(
 
 void _printMatches(DocContext context, BriefResult result) {
   context.out.writeln(
-    'Matched ${result.matches.length} lesson(s) on ${result.candidates.isEmpty ? 'no files' : result.candidates.join(', ')}:',
+    'Matched ${plural(result.matches.length, 'lesson')} on ${result.candidates.isEmpty ? 'no files' : result.candidates.join(', ')}:',
   );
   for (final match in result.matches) {
     context.out.writeln(
@@ -764,10 +765,14 @@ Future<int> runStartCommand(DocContext context) async {
   } else if (result.brief == null) {
     return 0; // --show-prompt
   } else {
+    // The question's one shape: the brief, "From: <title>" per lesson,
+    // then [y/N]. Lesson IDs and scores come after the answer (details).
     context.out
       ..writeln(result.brief)
       ..writeln('');
-    _printMatches(context, result);
+    for (final match in result.matches) {
+      context.out.writeln('From: ${match.lesson.title}');
+    }
     if (context.args['yes'] as bool) {
       accepted = true;
       context.out.writeln('Adding the brief to the first prompt (--yes).');
@@ -776,6 +781,7 @@ Future<int> runStartCommand(DocContext context) async {
       final answer = ((await context.readLine()) ?? '').trim().toLowerCase();
       accepted = answer == 'y' || answer == 'yes';
     }
+    _printMatches(context, result);
   }
   final prompt = composeFirstPrompt(
     task: task,
@@ -819,7 +825,7 @@ int _printPrepared(
     ..writeln(
       'Would send to ${prepared.route.provider.id} (${prepared.route.model}). Nothing was sent.',
     )
-    ..writeln('Redacted: ${prepared.redactionCount} item(s)')
+    ..writeln('Redacted: ${plural(prepared.redactionCount, 'item')}')
     ..writeln(const JsonEncoder.withIndent('  ').convert(prepared.body));
   return 0;
 }

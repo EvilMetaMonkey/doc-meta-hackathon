@@ -184,7 +184,7 @@ void main() {
       answers.add('n');
       expect(await doc(['bisect', '--test', goodTest]), 0, reason: '$err');
       final text = '$out';
-      expect(text, contains('Bisecting 5 checkpoint(s)'));
+      expect(text, contains('Bisecting 5 checkpoints'));
       expect(
         text,
         contains(
@@ -207,7 +207,7 @@ void main() {
       expect(
         text,
         contains(
-          'Restore to before this turn? [y/N] Not restored. You can run: doc restore ${ids[2]}',
+          'Undo this claude turn? 2 files change (feature3.txt, state.txt)  [y/N] Nothing was changed.',
         ),
       );
       // The diff of the bad turn and the failing output reached the model.
@@ -249,7 +249,7 @@ void main() {
       0,
       reason: '$err',
     );
-    expect('$out', contains('Bisecting 3 checkpoint(s)'));
+    expect('$out', contains('Bisecting 3 checkpoints'));
     expect('$out', contains('First bad turn: ${later[2]}'));
   });
 
@@ -306,7 +306,7 @@ void main() {
       '$out',
       contains('(invalid): only closed checkpoints can be tested.'),
     );
-    expect('$out', contains('Bisecting 2 checkpoint(s)'));
+    expect('$out', contains('Bisecting 2 checkpoints'));
   });
 
   test('a timeout counts as a failure', () async {
@@ -582,19 +582,21 @@ void main() {
       await agentTurn('Turn 2 breaks it', {'state.txt': 'bad\n'}),
       await agentTurn('Turn 3', {'feature3.txt': 'three\n'}),
     ];
-    answers.addAll(['y', 'y']);
+    answers.add('y');
     expect(
       await doc(['bisect', '--test', goodTest, '--no-explain', '--no-lesson']),
       0,
       reason: '$err',
     );
     expect('$out', contains('First bad turn: ${ids[1]}'));
-    expect('$out', contains('Restore would change 1 file(s):'));
+    expect('$out', isNot(contains('Restore would change')));
     expect(
       '$out',
-      contains('  - state.txt: put back the version from before the turn'),
+      contains(
+        'Undo this claude turn? state.txt: put back the version from before it  [y/N] ',
+      ),
     );
-    expect('$out', contains('Restored 1 file(s) through dmc'));
+    expect('$out', contains('Restored 1 file through dmc'));
     expect(file('state.txt').readAsStringSync(), 'good\n');
     expect(file('feature3.txt').readAsStringSync(), 'three\n');
   });

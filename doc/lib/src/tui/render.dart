@@ -7,6 +7,7 @@ import 'dart:math';
 import '../doctor_command.dart';
 import 'model.dart';
 import 'text.dart';
+import '../plural.dart';
 
 /// Smallest window the TUI draws in.
 const int tuiMinWidth = 80;
@@ -183,7 +184,7 @@ Line _header(TuiState state, int width) {
         .length;
     final warnings = h.problems.length - problems;
     if (problems > 0) {
-      spans.add(Span('· $problems problem(s) ', Tone.bad));
+      spans.add(Span('· ${plural(problems, 'problem')} ', Tone.bad));
     } else if (warnings > 0) {
       spans.add(Span('· $warnings to check ', Tone.warn));
     }
@@ -222,12 +223,14 @@ List<Line> _turnsColumn(TuiState state, int width, int height) {
       final selected = i == state.selected;
       final suffix = turn.undone ? ' undone' : '';
       final labelRoom = width - 12 - suffix.length;
+      // The title from the summary call when there is one, else the prompt.
+      final title = state.details[turn.id]?.title;
       rows.add([
         Span(selected ? ' ▶ ' : '   ', selected ? Tone.strong : Tone.normal),
         Span(glyph.symbol, glyph.tone),
         Span(' ${pad(turn.who, 6)} ', Tone.dim),
         Span(
-          fit(screenLabel(turn.label), labelRoom),
+          fit(title ?? screenLabel(turn.label), labelRoom),
           selected ? Tone.strong : (turn.undone ? Tone.dim : Tone.normal),
         ),
         if (suffix.isNotEmpty) Span(suffix, Tone.dim),
@@ -261,9 +264,14 @@ List<Line> _detailColumn(TuiState state, int width, int height) {
     if (glyph == TurnGlyph.undone) const Span(' · undone', Tone.dim),
     if (glyph == TurnGlyph.open) const Span(' · open', Tone.warn),
   ]);
-  rows.add(plain(' ${fit(screenLabel(turn.label), width - 2)}', Tone.dim));
-  rows.add(const []);
   final detail = state.details[turn.id];
+  // With a title, the raw prompt moves to details (d).
+  rows.add(
+    detail?.title != null
+        ? plain(' ${fit(detail!.title!, width - 2)}', Tone.strong)
+        : plain(' ${fit(screenLabel(turn.label), width - 2)}', Tone.dim),
+  );
+  rows.add(const []);
   if (detail?.summary != null) {
     for (final line in wrap(shortenIds(detail!.summary!), width - 2).take(4)) {
       rows.add(plain(' $line'));
@@ -276,7 +284,9 @@ List<Line> _detailColumn(TuiState state, int width, int height) {
     rows.add(plain(' s: summarize in plain English', Tone.dim));
   }
   rows.add(const []);
-  if (detail == null || detail.loadingDiff) {
+  if (detail == null ||
+      detail.loadingDiff ||
+      (detail.diff == null && detail.diffError == null && !turn.open)) {
     rows.add(plain(' reading the change…', Tone.dim));
   } else if (detail.diffError != null) {
     rows.add(plain(' ${fit(detail.diffError!, width - 2)}', Tone.dim));
@@ -296,14 +306,11 @@ List<Line> _detailColumn(TuiState state, int width, int height) {
     if (files.length > 4) {
       rows.add(plain('        … and ${files.length - 4} more (d)', Tone.dim));
     }
-    final diffLines = (detail.diff ?? '')
-        .split('\n')
-        .where((l) => !l.startsWith('--- '))
-        .take(min(12, max(0, height - rows.length - 1)));
-    if (diffLines.isNotEmpty) rows.add(const []);
-    for (final line in diffLines) {
-      final colored = diffLine(line);
-      rows.add([const Span(' '), ...colored]);
+    for (final line in diffPreview(
+      detail.diff ?? '',
+      min(12, max(0, height - rows.length)),
+    )) {
+      rows.add([const Span(' '), ...line]);
     }
   }
   while (rows.length < height) {
@@ -434,7 +441,7 @@ _Box _questionBox(Question question, int width) {
   ];
   // Context wraps (a brief is one long line); diff-like lines are cut.
   final contextRows = <Line>[];
-  for (final line in question.context) {
+  for (final line in question.shownContext) {
     final text = shortenIds(line);
     final pieces =
         text.startsWith('+') ||
@@ -452,12 +459,18 @@ _Box _questionBox(Question question, int width) {
           : contextRows) {
     rows.add(row(line));
   }
-  if (question.context.isNotEmpty) rows.add(row(const []));
-  if (question.yesNo) {
-    rows.add(row(plain(question.prompt.trimRight(), Tone.warn)));
-  } else {
-    rows.add(row(plain(question.prompt.trimRight(), Tone.warn)));
+  if (question.shownContext.isNotEmpty) rows.add(row(const []));
+  final prompt = shortenIds(question.prompt.trimRight());
+  for (final piece
+      in displayWidth(prompt) <= inner ? [prompt] : wrap(prompt, inner)) {
+    rows.add(row(plain(piece, Tone.warn)));
+  }
+  if (!question.yesNo) {
     rows.add(row([Span('> ${question.value}'), const Span('▏', Tone.warn)]));
+  } else if (question.oneLine &&
+      !question.showDetails &&
+      question.context.isNotEmpty) {
+    rows.add(row(plain('d: every file', Tone.dim)));
   }
   rows.add([Span('└${'─' * (width - 2)}┘', Tone.warn)]);
   return _Box(rows, width);
@@ -564,7 +577,7 @@ Line _voiceLine(TuiState state, int width) {
     ];
   } else if (state.voice.state == 'thinking') {
     content = [const Span('◉ ', Tone.warn), Span(state.voice.text, Tone.warn)];
-  } else if (state.note != null) {
+  } else if (state.note != null && !state.help && state.pager == null) {
     content = [const Span('◉ ', Tone.dim), Span(state.note!, state.noteTone)];
   } else {
     content = [
